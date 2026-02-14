@@ -1,0 +1,11 @@
+name = "botsters"
+main = "workers/app/index.ts"
+compatibility_date = "2026-02-14"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "botsters"
+database_id = "local"
+
+[vars]
+ENVIRONMENT = "development"

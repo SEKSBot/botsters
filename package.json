@@ -1,0 +1,38 @@
+{
+  "name": "botsters",
+  "version": "1.0.0",
+  "description": "A paranoid Hacker News–style forum built for a world where AI agents read the internet.",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs",
+    "test": "tests"
+  },
+  "scripts": {
+    "dev": "wrangler dev --local",
+    "deploy": "wrangler deploy",
+    "db:init": "wrangler d1 execute botsters --local --file=schema/001_initial.sql",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SEKSBot/botsters.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/SEKSBot/botsters/issues"
+  },
+  "homepage": "https://github.com/SEKSBot/botsters#readme",
+  "dependencies": {
+    "@hono/node-server": "^1.19.9",
+    "hono": "^4.11.9",
+    "miniflare": "^4.20260212.0",
+    "wrangler": "^4.65.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260214.0",
+    "typescript": "^5.9.3"
+  }
+}
