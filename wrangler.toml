@@ -7,5 +7,9 @@ binding = "DB"
 database_name = "botsters"
 database_id = "local"
 
+[ai]
+binding = "AI"
+
 [vars]
 ENVIRONMENT = "development"
+TRUST_SECRET = "botsters-trust-secret-change-in-prod"

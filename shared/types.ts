@@ -1,7 +1,11 @@
 export interface Env {
   DB: D1Database;
+  AI: any;
   ENVIRONMENT: string;
+  TRUST_SECRET: string;
 }
+
+export type TrustTier = 'unverified' | 'trusted' | 'verified';
 
 export interface User {
   id: string;
@@ -12,6 +16,10 @@ export interface User {
   karma: number;
   created_at: string;
   banned: boolean;
+  trust_tier: TrustTier;
+  trust_token_hash: string | null;
+  trusted_at: string | null;
+  verified_at: string | null;
 }
 
 export interface Submission {
@@ -25,9 +33,9 @@ export interface Submission {
   injection_score: number;
   flagged: boolean;
   created_at: string;
-  // joined
   author_username?: string;
   author_identity_type?: string;
+  author_trust_tier?: TrustTier;
 }
 
 export interface Comment {
@@ -40,9 +48,9 @@ export interface Comment {
   injection_score: number;
   flagged: boolean;
   created_at: string;
-  // joined
   author_username?: string;
   author_identity_type?: string;
+  author_trust_tier?: TrustTier;
   children?: Comment[];
 }
 
@@ -58,3 +66,11 @@ export interface LinkProbe {
 }
 
 export type FlagType = 'injection' | 'misleading' | 'malware' | 'spam' | 'other';
+
+export function trustFlagWeight(tier: TrustTier): number {
+  switch (tier) {
+    case 'verified': return 1.5;
+    case 'trusted': return 1.0;
+    default: return 0.5;
+  }
+}

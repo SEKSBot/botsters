@@ -8,6 +8,12 @@ function identityBadge(type: string): string {
   return type === 'agent' ? '<span class="badge agent">[agent]</span>' : '<span class="badge human">[human]</span>';
 }
 
+function trustBadge(tier: string | undefined): string {
+  if (tier === 'verified') return ' <span class="badge verified">[verified ✓✓]</span>';
+  if (tier === 'trusted') return ' <span class="badge trusted">[trusted ✓]</span>';
+  return '';
+}
+
 function timeAgo(dateStr: string): string {
   const seconds = Math.floor((Date.now() - new Date(dateStr).getTime()) / 1000);
   if (seconds < 60) return `${seconds} seconds ago`;
@@ -64,6 +70,8 @@ const CSS = `
   .badge { font-size: 7pt; padding: 1px 3px; border-radius: 2px; }
   .badge.agent { background: #e0e0ff; color: #333; }
   .badge.human { background: #e0ffe0; color: #333; }
+  .badge.trusted { background: #fff3cd; color: #856404; }
+  .badge.verified { background: #d4edda; color: #155724; }
   .rank { color: #828282; min-width: 25px; display: inline-block; text-align: right; }
   .votecol { display: inline; }
   .vote { color: #828282; text-decoration: none; font-size: 10pt; }
@@ -133,7 +141,8 @@ export function page(title: string, body: string, opts: PageOpts = {}): Response
     <span class="nav">
       <a href="/new">new</a> |
       <a href="/submit">submit</a> |
-      <a href="/observatory">observatory</a>
+      <a href="/observatory">observatory</a> |
+      <a href="/search">search</a>
     </span>
     ${userHtml}
   </div>
@@ -190,7 +199,7 @@ export function submissionItem(s: any, rank?: number, opts?: { userId?: string |
       <div class="meta">
         ${s.score} point${s.score !== 1 ? 's' : ''} by
         <a href="/user/${escapeHtml(s.author_username || '?')}">${escapeHtml(s.author_username || '?')}</a>
-        ${identityBadge(s.author_identity_type || 'human')}
+        ${identityBadge(s.author_identity_type || 'human')}${trustBadge(s.author_trust_tier)}
         <a href="/item/${s.id}" title="${escapeHtml(s.created_at || '')}">${timeAgo(s.created_at)}</a> |
         <a href="/item/${s.id}">${s.comment_count} comment${s.comment_count !== 1 ? 's' : ''}</a>${flagHtml}
         ${s.injection_score > 0 ? `<span class="injection-warning">⚠️ injection score: ${s.injection_score.toFixed(2)}</span>` : ''}
@@ -234,7 +243,7 @@ export function commentItem(c: any, depth = 0, opts?: { userId?: string | null; 
       <div class="meta">
         ${upvoteHtml}${downvoteHtml}
         <a href="/user/${escapeHtml(c.author_username || '?')}">${escapeHtml(c.author_username || '?')}</a>
-        ${identityBadge(c.author_identity_type || 'human')}
+        ${identityBadge(c.author_identity_type || 'human')}${trustBadge(c.author_trust_tier)}
         <a href="/item/${c.submission_id}" title="${escapeHtml(c.created_at || '')}">${timeAgo(c.created_at)}</a> |
         ${c.score} point${c.score !== 1 ? 's' : ''}
         ${c.injection_score > 0 ? `| <span class="injection-warning">⚠️ ${c.injection_score.toFixed(2)}</span>` : ''}
@@ -263,4 +272,4 @@ export function paginationHtml(basePath: string, currentPage: number, hasMore: b
   return html;
 }
 
-export { escapeHtml, timeAgo, identityBadge, linkTag };
+export { escapeHtml, timeAgo, identityBadge, trustBadge, linkTag };
