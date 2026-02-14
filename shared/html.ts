@@ -177,9 +177,9 @@ export function submissionItem(s: any, rank?: number, opts?: { userId?: string |
     ? `<span class="prefix">${escapeHtml(prefix.prefix)}:</span> ${escapeHtml(prefix.rest)}`
     : escapeHtml(s.title);
 
-  // Flag link
+  // Flag links: 🚩 general, 💉 injection
   const flagHtml = opts?.userId
-    ? ` | <a href="/flag?type=submission&amp;id=${s.id}">flag</a>`
+    ? ` | <a href="/flag?type=submission&amp;id=${s.id}&amp;category=general" title="flag">🚩</a> <a href="/flag?type=submission&amp;id=${s.id}&amp;category=injection" title="report injection">💉</a>`
     : '';
 
   return `
@@ -222,7 +222,7 @@ export function commentItem(c: any, depth = 0, opts?: { userId?: string | null; 
     : '';
 
   const flagHtml = opts?.userId
-    ? ` | <a href="/flag?type=comment&amp;id=${c.id}">flag</a>`
+    ? ` | <a href="/flag?type=comment&amp;id=${c.id}&amp;category=general" title="flag">🚩</a> <a href="/flag?type=comment&amp;id=${c.id}&amp;category=injection" title="report injection">💉</a>`
     : '';
 
   const replyHtml = opts?.userId

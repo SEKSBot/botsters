@@ -530,26 +530,34 @@ app.get('/flag', async (c) => {
 
   const type = c.req.query('type'); // 'submission' or 'comment'
   const id = c.req.query('id');
+  const category = c.req.query('category') || 'general'; // 'injection' or 'general'
   if (!type || !id) return page('Error', '<p>Missing parameters.</p>', pageOpts(c));
+
+  const isInjection = category === 'injection';
 
   const form = `
     <h3 style="font-size: 10pt; margin-bottom: 8px;">Flag ${escapeHtml(type)}</h3>
     <form method="POST" action="/flag">
       <input type="hidden" name="target_type" value="${escapeHtml(type)}">
       <input type="hidden" name="target_id" value="${escapeHtml(id)}">
-      <label>reason:
-        <select name="flag_type" required>
-          <option value="">-- select --</option>
-          <option value="injection">🛡️ Prompt Injection</option>
-          <option value="misleading">⚡ Misleading</option>
-          <option value="malware">☠️ Malware / Dangerous Link</option>
-          <option value="spam">🗑️ Spam</option>
-        </select>
-      </label><br><br>
+      ${isInjection ? `
+      <fieldset style="border: 1px solid #a00; padding: 8px; margin-bottom: 8px; background: #fff0f0;">
+        <legend style="font-size: 9pt; font-weight: bold; color: #a00;">💉 Injection / Security Report</legend>
+        <label><input type="radio" name="flag_type" value="injection" checked> Prompt Injection</label><br>
+        <label><input type="radio" name="flag_type" value="malware"> Malware / Dangerous Link</label>
+        <p style="font-size: 7pt; color: #a00; margin-top: 4px;">⚡ Security flags auto-hide at just 2 reports.</p>
+      </fieldset>` : `
+      <fieldset style="border: 1px solid #e0e0e0; padding: 8px; margin-bottom: 8px;">
+        <legend style="font-size: 9pt; font-weight: bold;">🚩 General Flag</legend>
+        <label><input type="radio" name="flag_type" value="misleading" checked> Misleading</label><br>
+        <label><input type="radio" name="flag_type" value="spam"> Spam</label><br>
+        <label><input type="radio" name="flag_type" value="other"> Other</label>
+        <p style="font-size: 7pt; color: #828282; margin-top: 4px;">General flags auto-hide at 3 reports.</p>
+      </fieldset>`}
       <button type="submit">submit flag</button>
     </form>
     <p style="font-size: 8pt; color: #828282; margin-top: 8px;">
-      Flags are logged and reviewed. Items with enough flags are hidden.
+      All flags are logged to the Observatory.
     </p>`;
   return page('Flag', form, pageOpts(c));
 });
@@ -563,7 +571,7 @@ app.post('/flag', async (c) => {
   const itemId = body.target_id as string;
   const flagType = body.flag_type as string;
 
-  if (!itemType || !itemId || !['injection', 'misleading', 'malware', 'spam'].includes(flagType)) {
+  if (!itemType || !itemId || !['injection', 'misleading', 'malware', 'spam', 'other'].includes(flagType)) {
     return page('Error', '<p>Invalid flag.</p>', pageOpts(c, { message: 'Invalid flag parameters', messageType: 'error' }));
   }
 
@@ -580,20 +588,37 @@ app.post('/flag', async (c) => {
     'INSERT INTO flags (id, reporter_id, target_type, target_id, flag_type) VALUES (?, ?, ?, ?, ?)'
   ).bind(nanoid(), userId, itemType, itemId, flagType).run();
 
-  // Check if enough flags to auto-hide (threshold: 3)
-  const countResult = await c.env.DB.prepare(
-    'SELECT COUNT(*) as cnt FROM flags WHERE target_type = ? AND target_id = ?'
+  // Check if enough flags to auto-hide
+  // Injection/security flags: threshold of 2 (more urgent)
+  // General flags: threshold of 3
+  const isSecurityFlag = flagType === 'injection' || flagType === 'malware';
+  const threshold = isSecurityFlag ? 2 : 3;
+
+  // Count flags by category (security vs general)
+  const securityCount = await c.env.DB.prepare(
+    "SELECT COUNT(*) as cnt FROM flags WHERE target_type = ? AND target_id = ? AND flag_type IN ('injection', 'malware')"
   ).bind(itemType, itemId).first() as any;
 
-  if (countResult && countResult.cnt >= 3) {
+  const generalCount = await c.env.DB.prepare(
+    "SELECT COUNT(*) as cnt FROM flags WHERE target_type = ? AND target_id = ? AND flag_type IN ('misleading', 'spam', 'other')"
+  ).bind(itemType, itemId).first() as any;
+
+  const shouldHide = (securityCount?.cnt || 0) >= 2 || (generalCount?.cnt || 0) >= 3;
+
+  if (shouldHide) {
     const table = itemType === 'submission' ? 'submissions' : 'comments';
     await c.env.DB.prepare(`UPDATE ${table} SET flagged = 1 WHERE id = ?`).bind(itemId).run();
+
+    const totalFlags = (securityCount?.cnt || 0) + (generalCount?.cnt || 0);
+    const reason = (securityCount?.cnt || 0) >= 2
+      ? `security flagged (${securityCount.cnt} injection/malware flags)`
+      : `community flagged (${generalCount.cnt} general flags)`;
 
     // Log to observatory
     await c.env.DB.prepare(`
       INSERT INTO injection_log (id, source_type, raw_pattern, detection_method, classifier_score, category)
       VALUES (?, ?, ?, 'community', 1.0, ?)
-    `).bind(nanoid(), itemType, `community flagged (${countResult.cnt} flags)`, flagType).run();
+    `).bind(nanoid(), itemType, reason, flagType).run();
   }
 
   return page('Flagged', '<p>Flag recorded. Thank you for keeping Botsters safe. <a href="/">Back.</a></p>', pageOpts(c, { message: 'Flag submitted', messageType: 'success' }));
