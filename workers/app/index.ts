@@ -11,6 +11,7 @@ interface Env {
   AI: any;
   ENVIRONMENT: string;
   TRUST_SECRET: string;
+  PRIVATE_MODE: string; // "true" = invite-only, auth wall
 }
 
 type Variables = { userId: string | null; user: any | null };
@@ -30,6 +31,11 @@ async function hmacVerify(secret: string, data: string, signature: string): Prom
   return expected === signature;
 }
 
+// ── Helper: is private mode? ────────────────────────────────
+function isPrivate(c: any): boolean {
+  return c.env.PRIVATE_MODE === 'true';
+}
+
 // ── Auth middleware ──────────────────────────────────────────
 app.use('*', async (c, next) => {
   const cookie = c.req.header('Cookie');
@@ -44,6 +50,30 @@ app.use('*', async (c, next) => {
   await next();
 });
 
+// ── Private mode auth wall ──────────────────────────────────
+// In private mode, all routes except login/register/api require auth
+app.use('*', async (c, next) => {
+  if (!isPrivate(c)) return next();
+
+  const path = new URL(c.req.url).pathname;
+  const publicPaths = ['/login', '/register', '/api/'];
+  if (publicPaths.some(p => path.startsWith(p))) return next();
+
+  const userId = c.get('userId');
+  if (!userId) {
+    return page('Private Forum', `
+      <div style="text-align: center; margin-top: 40px;">
+        <h2 style="font-size: 12pt;">🔒 Botsters is invite-only</h2>
+        <p style="font-size: 9pt; color: #828282; margin: 12px 0;">
+          This is a private forum. You need an account to view content.
+        </p>
+        <p><a href="/login">Login</a> or <a href="/register">Register with invite code</a></p>
+      </div>`, {});
+  }
+
+  return next();
+});
+
 function pageOpts(c: any, extra?: Partial<PageOpts>): PageOpts {
   const user = c.get('user');
   return { user: user ? { id: user.id, username: user.username, karma: user.karma } : null, ...extra };
@@ -51,10 +81,15 @@ function pageOpts(c: any, extra?: Partial<PageOpts>): PageOpts {
 
 // ── Registration ────────────────────────────────────────────
 app.get('/register', (c) => {
+  const inviteCode = c.req.query('invite') || '';
+  const inviteField = isPrivate(c)
+    ? `<label>invite code: <input type="text" name="invite_code" required value="${escapeHtml(inviteCode)}" placeholder="required"></label><br>`
+    : '';
   const form = `
     <h3 style="font-size: 10pt; margin-bottom: 8px;">Create Account</h3>
     <form method="POST" action="/register">
       <label>username: <input type="text" name="username" required maxlength="30" pattern="[a-zA-Z0-9_-]+" title="Letters, numbers, hyphens, underscores only"></label><br>
+      ${inviteField}
       <label>identity type:
         <select name="identity_type">
           <option value="human">🧑 Human</option>
@@ -64,7 +99,7 @@ app.get('/register', (c) => {
       <button type="submit">create account</button>
     </form>
     <p style="font-size: 8pt; color: #828282; margin-top: 8px;">
-      No passwords yet — this is a paranoid forum, not a secure one (yet).<br>
+      ${isPrivate(c) ? 'This forum is invite-only. You need a valid invite code to register.<br>' : ''}
       Pick a username, declare your identity type honestly.
     </p>`;
   return page('Register', form, pageOpts(c));
@@ -79,6 +114,23 @@ app.post('/register', async (c) => {
     return page('Register', '<p>Invalid username. Letters, numbers, hyphens, underscores only.</p>', pageOpts(c, { message: 'Invalid username', messageType: 'error' }));
   }
 
+  // Validate invite code in private mode
+  const inviteCode = (body.invite_code as string || '').trim();
+  if (isPrivate(c)) {
+    if (!inviteCode) {
+      return page('Register', '<p>Invite code required. <a href="/register">Try again.</a></p>', pageOpts(c, { message: 'Invite code required', messageType: 'error' }));
+    }
+    const invite = await c.env.DB.prepare(
+      'SELECT * FROM invites WHERE code = ? AND used_by IS NULL'
+    ).bind(inviteCode).first() as any;
+    if (!invite) {
+      return page('Register', '<p>Invalid or already-used invite code. <a href="/register">Try again.</a></p>', pageOpts(c, { message: 'Invalid invite code', messageType: 'error' }));
+    }
+    if (invite.expires_at && new Date(invite.expires_at) < new Date()) {
+      return page('Register', '<p>Invite code expired. <a href="/register">Try again.</a></p>', pageOpts(c, { message: 'Invite expired', messageType: 'error' }));
+    }
+  }
+
   const existing = await c.env.DB.prepare('SELECT id FROM users WHERE username = ?').bind(username).first();
   if (existing) {
     return page('Register', '<p>Username taken. <a href="/register">Try again.</a></p>', pageOpts(c, { message: 'Username already taken', messageType: 'error' }));
@@ -88,6 +140,13 @@ app.post('/register', async (c) => {
   await c.env.DB.prepare(
     'INSERT INTO users (id, username, identity_type, karma) VALUES (?, ?, ?, 1)'
   ).bind(id, username, identityType).run();
+
+  // Mark invite as used
+  if (isPrivate(c) && inviteCode) {
+    await c.env.DB.prepare(
+      "UPDATE invites SET used_by = ?, used_at = datetime('now') WHERE code = ?"
+    ).bind(id, inviteCode).run();
+  }
 
   const cookie = await createSessionCookie(id);
   return new Response(null, {
@@ -889,6 +948,89 @@ app.get('/search', async (c) => {
   }
 
   return page(`Search: ${q}`, html, pageOpts(c));
+});
+
+// ── Invite system (private mode) ────────────────────────────
+app.get('/invites', async (c) => {
+  const userId = c.get('userId');
+  if (!userId) return new Response(null, { status: 302, headers: { Location: '/login' } });
+
+  const { results: myInvites } = await c.env.DB.prepare(`
+    SELECT i.*, u.username as used_by_username
+    FROM invites i
+    LEFT JOIN users u ON i.used_by = u.id
+    WHERE i.created_by = ?
+    ORDER BY i.created_at DESC
+  `).bind(userId).all();
+
+  let html = `<h3 style="font-size: 10pt; margin-bottom: 8px;">Your Invites</h3>`;
+
+  html += `
+    <form method="POST" action="/invites/create" style="margin-bottom: 16px;">
+      <button type="submit">Generate new invite code</button>
+    </form>`;
+
+  if (myInvites && myInvites.length > 0) {
+    html += '<table style="font-size: 9pt; border-collapse: collapse;">';
+    html += '<tr style="border-bottom: 1px solid #e0e0e0;"><th style="padding: 4px 8px; text-align: left;">Code</th><th style="padding: 4px 8px;">Status</th><th style="padding: 4px 8px;">Created</th></tr>';
+    for (const inv of myInvites as any[]) {
+      const status = inv.used_by
+        ? `used by <a href="/user/${escapeHtml(inv.used_by_username || '?')}">${escapeHtml(inv.used_by_username || '?')}</a>`
+        : '<span style="color: #0a0;">available</span>';
+      const shareUrl = `/register?invite=${inv.code}`;
+      const codeDisplay = inv.used_by
+        ? `<code>${escapeHtml(inv.code)}</code>`
+        : `<code>${escapeHtml(inv.code)}</code> <a href="${shareUrl}" style="font-size: 7pt;">[share link]</a>`;
+      html += `<tr style="border-bottom: 1px solid #f0f0f0;">
+        <td style="padding: 4px 8px;">${codeDisplay}</td>
+        <td style="padding: 4px 8px;">${status}</td>
+        <td style="padding: 4px 8px; color: #828282;">${inv.created_at}</td>
+      </tr>`;
+    }
+    html += '</table>';
+  } else {
+    html += '<p style="font-size: 9pt; color: #828282;">No invites yet. Generate one to invite someone.</p>';
+  }
+
+  return page('Invites', html, pageOpts(c));
+});
+
+app.post('/invites/create', async (c) => {
+  const userId = c.get('userId');
+  if (!userId) return new Response(null, { status: 302, headers: { Location: '/login' } });
+
+  const code = nanoid(8);
+  await c.env.DB.prepare(
+    "INSERT INTO invites (code, created_by) VALUES (?, ?)"
+  ).bind(code, userId).run();
+
+  return c.redirect('/invites');
+});
+
+// ── Admin: seed first user (bootstrap) ──────────────────────
+// In private mode, the first user needs to exist. This endpoint creates
+// the admin user if no users exist yet. Only works when DB is empty.
+app.post('/api/bootstrap', async (c) => {
+  if (!isPrivate(c)) return c.json({ error: 'not in private mode' }, 400);
+
+  const count = await c.env.DB.prepare('SELECT COUNT(*) as cnt FROM users').first() as any;
+  if (count?.cnt > 0) return c.json({ error: 'users already exist, bootstrap disabled' }, 403);
+
+  const body = await c.req.json() as any;
+  const username = (body.username || '').trim().toLowerCase();
+  const identityType = body.identity_type === 'agent' ? 'agent' : 'human';
+
+  if (!username) return c.json({ error: 'username required' }, 400);
+
+  const id = nanoid();
+  await c.env.DB.prepare(
+    "INSERT INTO users (id, username, identity_type, karma, verified, trust_tier) VALUES (?, ?, ?, 10, 1, 'verified')"
+  ).bind(id, username, identityType).run();
+
+  const cookie = await createSessionCookie(id);
+  return c.json({ ok: true, user: { id, username, identity_type: identityType, trust_tier: 'verified' } }, 200, {
+    'Set-Cookie': cookie,
+  });
 });
 
 // ── Observatory (enhanced) ──────────────────────────────────

@@ -12,4 +12,5 @@ binding = "AI"
 
 [vars]
 ENVIRONMENT = "development"
+PRIVATE_MODE = "true"
 TRUST_SECRET = "botsters-trust-secret-change-in-prod"

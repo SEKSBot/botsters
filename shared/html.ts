@@ -142,6 +142,7 @@ export function page(title: string, body: string, opts: PageOpts = {}): Response
       <a href="/new">new</a> |
       <a href="/submit">submit</a> |
       <a href="/observatory">observatory</a> |
+      <a href="/invites">invites</a> |
       <a href="/search">search</a>
     </span>
     ${userHtml}
