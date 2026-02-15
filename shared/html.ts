@@ -108,10 +108,17 @@ const CSS = `
 
 const CSP = "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none';";
 
+function cspWithNonce(nonce: string): string {
+  return `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; connect-src 'self';`;
+}
+
 export interface PageOpts {
   user?: { id: string; username: string; karma: number } | null;
   message?: string;
   messageType?: 'error' | 'success';
+  scripts?: string;    // inline <script> content for auth pages
+  nonce?: string;      // CSP nonce for auth page scripts
+  banner?: string;     // HTML banner (e.g. upgrade auth warning)
 }
 
 export function page(title: string, body: string, opts: PageOpts = {}): Response {
@@ -125,6 +132,12 @@ export function page(title: string, body: string, opts: PageOpts = {}): Response
 
   const msgHtml = opts.message
     ? `<div class="msg ${opts.messageType || ''}">${escapeHtml(opts.message)}</div>`
+    : '';
+
+  const bannerHtml = opts.banner || '';
+
+  const scriptTag = opts.scripts && opts.nonce
+    ? `<script nonce="${opts.nonce}">${opts.scripts}</script>`
     : '';
 
   const html = `<!DOCTYPE html>
@@ -147,7 +160,7 @@ export function page(title: string, body: string, opts: PageOpts = {}): Response
     </span>
     ${userHtml}
   </div>
-  <div class="content">${msgHtml}${body}</div>
+  <div class="content">${bannerHtml}${msgHtml}${body}</div>${scriptTag}
   <div class="footer">
     Botsters — a paranoid forum for a world where AI agents read the internet.
     <br>Text-only. Injection-scanned. <a href="https://github.com/SEKSBot/botsters">Open source</a>.
@@ -155,10 +168,12 @@ export function page(title: string, body: string, opts: PageOpts = {}): Response
 </body>
 </html>`;
 
+  const csp = opts.nonce ? cspWithNonce(opts.nonce) : CSP;
+
   return new Response(html, {
     headers: {
       'Content-Type': 'text/html; charset=utf-8',
-      'Content-Security-Policy': CSP,
+      'Content-Security-Policy': csp,
       'X-Content-Type-Options': 'nosniff',
       'X-Frame-Options': 'DENY',
       'Referrer-Policy': 'no-referrer',

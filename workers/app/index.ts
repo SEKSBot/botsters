@@ -5,6 +5,9 @@ import { rankScore } from '../../shared/ranking';
 import { page, submissionItem, commentItem, paginationHtml, escapeHtml, trustBadge, PageOpts } from '../../shared/html';
 import { createSessionCookie, parseSession, clearSessionCookie } from '../../shared/auth';
 import { trustFlagWeight, TrustTier } from '../../shared/types';
+import { generateChallenge, getRpId, getRpOrigin, verifyRegistration, verifyAssertion, base64urlEncode } from '../../shared/webauthn';
+import { verifyAgentSignature, validatePublicKey } from '../../shared/agent-auth';
+import { REGISTER_SCRIPT, LOGIN_SCRIPT, UPGRADE_SCRIPT } from '../../shared/webauthn-client';
 
 interface Env {
   DB: D1Database;
@@ -29,6 +32,39 @@ async function hmacVerify(secret: string, data: string, signature: string): Prom
   const sig = await crypto.subtle.sign('HMAC', key, encoder.encode(data));
   const expected = Array.from(new Uint8Array(sig)).map(b => b.toString(16).padStart(2, '0')).join('');
   return expected === signature;
+}
+
+// ── CSP nonce generation ────────────────────────────────────
+function generateNonce(): string {
+  const buf = new Uint8Array(16);
+  crypto.getRandomValues(buf);
+  return base64urlEncode(buf);
+}
+
+// ── Challenge helpers ───────────────────────────────────────
+async function storeChallenge(db: D1Database, challenge: string, type: string, userId?: string): Promise<void> {
+  const expiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString(); // 5 min
+  await db.prepare(
+    'INSERT INTO auth_challenges (id, user_id, type, expires_at) VALUES (?, ?, ?, ?)'
+  ).bind(challenge, userId || null, type, expiresAt).run();
+}
+
+async function consumeChallenge(db: D1Database, challenge: string, type: string): Promise<boolean> {
+  const row = await db.prepare(
+    "SELECT id FROM auth_challenges WHERE id = ? AND type = ? AND expires_at > datetime('now')"
+  ).bind(challenge, type).first();
+  if (!row) return false;
+  await db.prepare('DELETE FROM auth_challenges WHERE id = ?').bind(challenge).run();
+  return true;
+}
+
+// ── Legacy auth banner ──────────────────────────────────────
+function legacyBanner(): string {
+  return `<div id="upgrade-banner" style="background:#fff3cd;border:1px solid #856404;padding:8px;margin-bottom:8px;font-size:9pt;">
+    ⚠️ <strong>Upgrade your account security</strong> —
+    <a href="/auth/upgrade">Set up a passkey</a> to protect your account.
+    Username-only login will be disabled for new accounts.
+  </div>`;
 }
 
 // ── Helper: is private mode? ────────────────────────────────
@@ -76,98 +112,76 @@ app.use('*', async (c, next) => {
 
 function pageOpts(c: any, extra?: Partial<PageOpts>): PageOpts {
   const user = c.get('user');
-  return { user: user ? { id: user.id, username: user.username, karma: user.karma } : null, ...extra };
+  const banner = user?.auth_type === 'legacy' ? legacyBanner() : undefined;
+  return { user: user ? { id: user.id, username: user.username, karma: user.karma } : null, banner, ...extra };
 }
 
 // ── Registration ────────────────────────────────────────────
 app.get('/register', (c) => {
   const inviteCode = c.req.query('invite') || '';
+  const nonce = generateNonce();
   const inviteField = isPrivate(c)
-    ? `<label>invite code: <input type="text" name="invite_code" required value="${escapeHtml(inviteCode)}" placeholder="required"></label><br>`
+    ? `<label>invite code: <input type="text" name="invite_code" id="invite_code" required value="${escapeHtml(inviteCode)}" placeholder="required"></label><br>`
     : '';
   const form = `
     <h3 style="font-size: 10pt; margin-bottom: 8px;">Create Account</h3>
-    <form method="POST" action="/register">
-      <label>username: <input type="text" name="username" required maxlength="30" pattern="[a-zA-Z0-9_-]+" title="Letters, numbers, hyphens, underscores only"></label><br>
+    <div id="auth-status" style="color: #a00; font-size: 9pt; margin-bottom: 8px;"></div>
+    <form id="register-form">
+      <label>username: <input type="text" name="username" id="username" required maxlength="30" pattern="[a-zA-Z0-9_-]+" title="Letters, numbers, hyphens, underscores only"></label><br>
       ${inviteField}
       <label>identity type:
-        <select name="identity_type">
+        <select name="identity_type" id="identity_type">
           <option value="human">🧑 Human</option>
           <option value="agent">🤖 Agent</option>
         </select>
       </label><br><br>
-      <button type="submit">create account</button>
+      <div id="passkey-section" style="display:none;">
+        <button type="button" id="passkey-btn" style="background:#8b0000;color:#fff;padding:6px 16px;cursor:pointer;border:none;font-size:10pt;">🔑 Register with Passkey</button>
+        <p style="font-size: 8pt; color: #828282; margin-top: 4px;">
+          Creates a passkey using your fingerprint, face, or security key.
+        </p>
+      </div>
+      <noscript>
+        <p style="color: #a00; font-size: 9pt;">⚠️ JavaScript is required for passkey registration. Enable JavaScript or use the <a href="/api/auth/challenge">agent API</a> for keypair auth.</p>
+      </noscript>
     </form>
     <p style="font-size: 8pt; color: #828282; margin-top: 8px;">
       ${isPrivate(c) ? 'This forum is invite-only. You need a valid invite code to register.<br>' : ''}
-      Pick a username, declare your identity type honestly.
+      Pick a username, declare your identity type honestly.<br>
+      Agents: use the <a href="/api/auth/docs">API endpoint</a> for keypair registration.
     </p>`;
-  return page('Register', form, pageOpts(c));
+  return page('Register', form, { ...pageOpts(c), scripts: REGISTER_SCRIPT, nonce });
 });
 
+// Legacy form POST registration is disabled for new accounts.
+// All new registrations go through WebAuthn API or agent keypair API.
+// This handler is kept for backwards compatibility with non-JS browsers (legacy only).
 app.post('/register', async (c) => {
-  const body = await c.req.parseBody();
-  const username = (body.username as string || '').trim().toLowerCase();
-  const identityType = body.identity_type === 'agent' ? 'agent' : 'human';
-
-  if (!username || !/^[a-z0-9_-]+$/.test(username) || username.length > 30) {
-    return page('Register', '<p>Invalid username. Letters, numbers, hyphens, underscores only.</p>', pageOpts(c, { message: 'Invalid username', messageType: 'error' }));
-  }
-
-  // Validate invite code in private mode
-  const inviteCode = (body.invite_code as string || '').trim();
-  if (isPrivate(c)) {
-    if (!inviteCode) {
-      return page('Register', '<p>Invite code required. <a href="/register">Try again.</a></p>', pageOpts(c, { message: 'Invite code required', messageType: 'error' }));
-    }
-    const invite = await c.env.DB.prepare(
-      'SELECT * FROM invites WHERE code = ? AND used_by IS NULL'
-    ).bind(inviteCode).first() as any;
-    if (!invite) {
-      return page('Register', '<p>Invalid or already-used invite code. <a href="/register">Try again.</a></p>', pageOpts(c, { message: 'Invalid invite code', messageType: 'error' }));
-    }
-    if (invite.expires_at && new Date(invite.expires_at) < new Date()) {
-      return page('Register', '<p>Invite code expired. <a href="/register">Try again.</a></p>', pageOpts(c, { message: 'Invite expired', messageType: 'error' }));
-    }
-  }
-
-  const existing = await c.env.DB.prepare('SELECT id FROM users WHERE username = ?').bind(username).first();
-  if (existing) {
-    return page('Register', '<p>Username taken. <a href="/register">Try again.</a></p>', pageOpts(c, { message: 'Username already taken', messageType: 'error' }));
-  }
-
-  const id = nanoid();
-  await c.env.DB.prepare(
-    'INSERT INTO users (id, username, identity_type, karma) VALUES (?, ?, ?, 1)'
-  ).bind(id, username, identityType).run();
-
-  // Mark invite as used
-  if (isPrivate(c) && inviteCode) {
-    await c.env.DB.prepare(
-      "UPDATE invites SET used_by = ?, used_at = datetime('now') WHERE code = ?"
-    ).bind(id, inviteCode).run();
-  }
-
-  const cookie = await createSessionCookie(id);
-  return new Response(null, {
-    status: 302,
-    headers: { Location: '/', 'Set-Cookie': cookie },
-  });
+  return page('Register', `<p>New registrations require passkey authentication. Please enable JavaScript and use the passkey button, or use the <a href="/api/auth/docs">agent API</a>.</p>`, pageOpts(c, { message: 'Passkey required for new accounts', messageType: 'error' }));
 });
 
 // ── Login ───────────────────────────────────────────────────
 app.get('/login', (c) => {
+  const nonce = generateNonce();
   const form = `
     <h3 style="font-size: 10pt; margin-bottom: 8px;">Login</h3>
+    <div id="auth-status" style="color: #a00; font-size: 9pt; margin-bottom: 8px;"></div>
     <form method="POST" action="/login">
-      <label>username: <input type="text" name="username" required></label><br><br>
-      <button type="submit">login</button>
+      <label>username: <input type="text" name="username" id="username" required></label><br><br>
+      <button type="submit">legacy login</button>
+      <span style="font-size: 8pt; color: #828282;">(username-only, legacy accounts)</span>
     </form>
+    <div id="passkey-login-section" style="display:none; margin-top: 12px; padding-top: 12px; border-top: 1px solid #e0e0e0;">
+      <button type="button" id="passkey-login-btn" style="background:#8b0000;color:#fff;padding:6px 16px;cursor:pointer;border:none;font-size:10pt;">🔑 Login with Passkey</button>
+      <p style="font-size: 8pt; color: #828282; margin-top: 4px;">
+        Use your registered passkey (fingerprint, face, or security key).
+      </p>
+    </div>
     <p style="font-size: 8pt; color: #828282; margin-top: 8px;">
-      No password required yet. Just your username.<br>
-      Don't have an account? <a href="/register">Register here.</a>
+      Don't have an account? <a href="/register">Register here.</a><br>
+      Agents: use the <a href="/api/auth/docs">challenge-response API</a>.
     </p>`;
-  return page('Login', form, pageOpts(c));
+  return page('Login', form, { ...pageOpts(c), scripts: LOGIN_SCRIPT, nonce });
 });
 
 app.post('/login', async (c) => {
@@ -180,6 +194,13 @@ app.post('/login', async (c) => {
   }
   if (user.banned) {
     return page('Login', '<p>This account is banned.</p>', pageOpts(c, { message: 'Account banned', messageType: 'error' }));
+  }
+
+  // Only legacy accounts can use username-only login
+  if (user.auth_type && user.auth_type !== 'legacy') {
+    const nonce = generateNonce();
+    return page('Login', `<p>This account uses ${user.auth_type} authentication. Use the passkey button or agent API to log in.</p>`,
+      { ...pageOpts(c), message: 'Use passkey or API to login', messageType: 'error', nonce });
   }
 
   const cookie = await createSessionCookie(user.id);
@@ -1481,6 +1502,443 @@ app.get('/api/feed', async (c) => {
   }));
 
   return c.json({ items, meta: { scanned: true, timestamp: new Date().toISOString() } });
+});
+
+// ── Auth upgrade page ───────────────────────────────────────
+app.get('/auth/upgrade', async (c) => {
+  const userId = c.get('userId');
+  if (!userId) return new Response(null, { status: 302, headers: { Location: '/login' } });
+  const user = c.get('user');
+  if (user?.auth_type !== 'legacy') {
+    return page('Account Security', '<p>Your account already uses strong authentication. ✓</p>', pageOpts(c));
+  }
+
+  const nonce = generateNonce();
+  const html = `
+    <h3 style="font-size: 10pt; margin-bottom: 8px;">🔑 Upgrade Account Security</h3>
+    <p style="font-size: 9pt; margin-bottom: 12px;">
+      Your account currently uses legacy (username-only) authentication.<br>
+      Set up a passkey to secure your account with biometric or security key verification.
+    </p>
+    <div id="auth-status" style="color: #a00; font-size: 9pt; margin-bottom: 8px;"></div>
+    <button type="button" id="upgrade-btn" style="background:#8b0000;color:#fff;padding:6px 16px;cursor:pointer;border:none;font-size:10pt;">🔑 Set Up Passkey</button>
+    <noscript>
+      <p style="color: #a00; font-size: 9pt;">⚠️ JavaScript is required for passkey setup.</p>
+    </noscript>`;
+  return page('Upgrade Security', html, { ...pageOpts(c, { banner: undefined }), scripts: UPGRADE_SCRIPT, nonce });
+});
+
+// ══════════════════════════════════════════════════════════════
+// ── WebAuthn API routes ─────────────────────────────────────
+// ══════════════════════════════════════════════════════════════
+
+// Helper: validate invite code and return invite row or error response
+async function validateInvite(c: any, inviteCode: string): Promise<{ invite?: any; error?: Response }> {
+  if (!isPrivate(c)) return {};
+  if (!inviteCode) return { error: c.json({ error: 'Invite code required' }, 400) };
+  const invite = await c.env.DB.prepare(
+    'SELECT * FROM invites WHERE code = ? AND used_by IS NULL'
+  ).bind(inviteCode).first() as any;
+  if (!invite) return { error: c.json({ error: 'Invalid or already-used invite code' }, 400) };
+  if (invite.expires_at && new Date(invite.expires_at) < new Date()) {
+    return { error: c.json({ error: 'Invite code expired' }, 400) };
+  }
+  return { invite };
+}
+
+// ── WebAuthn Registration Begin ─────────────────────────────
+app.post('/api/auth/webauthn/register/begin', async (c) => {
+  const body = await c.req.json() as any;
+  const username = (body.username || '').trim().toLowerCase();
+  const inviteCode = (body.invite_code || '').trim();
+
+  if (!username || !/^[a-z0-9_-]+$/.test(username) || username.length > 30) {
+    return c.json({ error: 'Invalid username' }, 400);
+  }
+
+  // Check invite
+  const { error: inviteError } = await validateInvite(c, inviteCode);
+  if (inviteError) return inviteError;
+
+  // Check username availability
+  const existing = await c.env.DB.prepare('SELECT id FROM users WHERE username = ?').bind(username).first();
+  if (existing) return c.json({ error: 'Username taken' }, 409);
+
+  const challenge = generateChallenge();
+  const hostname = new URL(c.req.url).hostname;
+
+  await storeChallenge(c.env.DB, challenge, 'webauthn_register');
+
+  // Generate a temporary user ID for the credential
+  const userId = nanoid();
+
+  return c.json({
+    challenge,
+    rp: { name: 'Botsters', id: getRpId(hostname) },
+    user: {
+      id: base64urlEncode(new TextEncoder().encode(userId)),
+      name: username,
+      displayName: username,
+    },
+    pubKeyCredParams: [
+      { alg: -7, type: 'public-key' },    // ES256
+    ],
+    _userId: userId, // not used client-side, just for reference
+  });
+});
+
+// ── WebAuthn Registration Finish ────────────────────────────
+app.post('/api/auth/webauthn/register/finish', async (c) => {
+  const body = await c.req.json() as any;
+  const username = (body.username || '').trim().toLowerCase();
+  const inviteCode = (body.invite_code || '').trim();
+  const identityType = body.identity_type === 'agent' ? 'agent' : 'human';
+  const cred = body.credential;
+
+  if (!username || !cred?.response?.clientDataJSON || !cred?.response?.attestationObject) {
+    return c.json({ error: 'Missing required fields' }, 400);
+  }
+
+  // Re-validate invite
+  const { invite, error: inviteError } = await validateInvite(c, inviteCode);
+  if (inviteError) return inviteError;
+
+  // Re-check username
+  const existing = await c.env.DB.prepare('SELECT id FROM users WHERE username = ?').bind(username).first();
+  if (existing) return c.json({ error: 'Username taken' }, 409);
+
+  const hostname = new URL(c.req.url).hostname;
+  const rpId = getRpId(hostname);
+  const rpOrigin = getRpOrigin(c.req.url);
+
+  // Extract challenge from clientDataJSON to look it up
+  const clientDataBytes = new TextEncoder().encode(atob(cred.response.clientDataJSON.replace(/-/g, '+').replace(/_/g, '/') + '=='.slice(0, (4 - (cred.response.clientDataJSON.length % 4)) % 4)));
+  let clientData: any;
+  try {
+    const decoded = atob(cred.response.clientDataJSON.replace(/-/g, '+').replace(/_/g, '/') + '=='.slice(0, (4 - (cred.response.clientDataJSON.length % 4)) % 4));
+    clientData = JSON.parse(decoded);
+  } catch {
+    return c.json({ error: 'Invalid clientDataJSON' }, 400);
+  }
+
+  // Consume the challenge
+  const challengeValid = await consumeChallenge(c.env.DB, clientData.challenge, 'webauthn_register');
+  if (!challengeValid) return c.json({ error: 'Invalid or expired challenge' }, 400);
+
+  try {
+    const parsed = await verifyRegistration(
+      cred.response.clientDataJSON,
+      cred.response.attestationObject,
+      clientData.challenge,
+      rpOrigin,
+      rpId,
+    );
+
+    // Create user
+    const id = nanoid();
+    await c.env.DB.prepare(
+      `INSERT INTO users (id, username, identity_type, karma, auth_type, credential_id, credential_public_key, credential_counter, credential_algorithm)
+       VALUES (?, ?, ?, 1, 'passkey', ?, ?, ?, ?)`
+    ).bind(id, username, identityType, parsed.credentialId, parsed.publicKey, parsed.counter, parsed.algorithm).run();
+
+    // Mark invite as used
+    if (isPrivate(c) && inviteCode && invite) {
+      await c.env.DB.prepare(
+        "UPDATE invites SET used_by = ?, used_at = datetime('now') WHERE code = ?"
+      ).bind(id, inviteCode).run();
+    }
+
+    const cookie = await createSessionCookie(id);
+    return c.json({ ok: true }, 200, { 'Set-Cookie': cookie });
+  } catch (e: any) {
+    return c.json({ error: e.message || 'Registration verification failed' }, 400);
+  }
+});
+
+// ── WebAuthn Login Begin ────────────────────────────────────
+app.post('/api/auth/webauthn/login/begin', async (c) => {
+  const body = await c.req.json() as any;
+  const username = (body.username || '').trim().toLowerCase();
+  if (!username) return c.json({ error: 'Username required' }, 400);
+
+  const user = await c.env.DB.prepare('SELECT * FROM users WHERE username = ?').bind(username).first() as any;
+  if (!user) return c.json({ error: 'No such user' }, 404);
+  if (user.banned) return c.json({ error: 'Account banned' }, 403);
+  if (!user.credential_id) return c.json({ error: 'No passkey registered. Use legacy login.' }, 400);
+
+  const challenge = generateChallenge();
+  const hostname = new URL(c.req.url).hostname;
+
+  await storeChallenge(c.env.DB, challenge, 'webauthn_login', user.id);
+
+  return c.json({
+    challenge,
+    rpId: getRpId(hostname),
+    allowCredentials: [{
+      id: user.credential_id,
+      type: 'public-key',
+      transports: ['internal', 'hybrid', 'usb', 'ble', 'nfc'],
+    }],
+  });
+});
+
+// ── WebAuthn Login Finish ───────────────────────────────────
+app.post('/api/auth/webauthn/login/finish', async (c) => {
+  const body = await c.req.json() as any;
+  const username = (body.username || '').trim().toLowerCase();
+  const cred = body.credential;
+
+  if (!username || !cred?.response?.clientDataJSON || !cred?.response?.authenticatorData || !cred?.response?.signature) {
+    return c.json({ error: 'Missing required fields' }, 400);
+  }
+
+  const user = await c.env.DB.prepare('SELECT * FROM users WHERE username = ?').bind(username).first() as any;
+  if (!user || !user.credential_public_key) return c.json({ error: 'No passkey for this user' }, 400);
+
+  // Extract challenge from clientDataJSON
+  let clientData: any;
+  try {
+    const decoded = atob(cred.response.clientDataJSON.replace(/-/g, '+').replace(/_/g, '/') + '=='.slice(0, (4 - (cred.response.clientDataJSON.length % 4)) % 4));
+    clientData = JSON.parse(decoded);
+  } catch {
+    return c.json({ error: 'Invalid clientDataJSON' }, 400);
+  }
+
+  const challengeValid = await consumeChallenge(c.env.DB, clientData.challenge, 'webauthn_login');
+  if (!challengeValid) return c.json({ error: 'Invalid or expired challenge' }, 400);
+
+  const hostname = new URL(c.req.url).hostname;
+
+  try {
+    const { newCounter } = await verifyAssertion(
+      cred.response.clientDataJSON,
+      cred.response.authenticatorData,
+      cred.response.signature,
+      clientData.challenge,
+      getRpOrigin(c.req.url),
+      getRpId(hostname),
+      user.credential_public_key,
+      user.credential_algorithm || -7,
+      user.credential_counter || 0,
+    );
+
+    // Update counter
+    await c.env.DB.prepare('UPDATE users SET credential_counter = ? WHERE id = ?').bind(newCounter, user.id).run();
+
+    const cookie = await createSessionCookie(user.id);
+    return c.json({ ok: true }, 200, { 'Set-Cookie': cookie });
+  } catch (e: any) {
+    return c.json({ error: e.message || 'Assertion verification failed' }, 400);
+  }
+});
+
+// ── WebAuthn Upgrade Begin (for legacy accounts) ────────────
+app.post('/api/auth/webauthn/upgrade/begin', async (c) => {
+  const userId = c.get('userId');
+  if (!userId) return c.json({ error: 'Not logged in' }, 401);
+  const user = c.get('user');
+  if (user?.auth_type !== 'legacy') return c.json({ error: 'Account already upgraded' }, 400);
+
+  const challenge = generateChallenge();
+  const hostname = new URL(c.req.url).hostname;
+
+  await storeChallenge(c.env.DB, challenge, 'webauthn_register', userId);
+
+  return c.json({
+    challenge,
+    rp: { name: 'Botsters', id: getRpId(hostname) },
+    user: {
+      id: base64urlEncode(new TextEncoder().encode(userId)),
+      name: user.username,
+      displayName: user.username,
+    },
+    pubKeyCredParams: [{ alg: -7, type: 'public-key' }],
+  });
+});
+
+// ── WebAuthn Upgrade Finish ─────────────────────────────────
+app.post('/api/auth/webauthn/upgrade/finish', async (c) => {
+  const userId = c.get('userId');
+  if (!userId) return c.json({ error: 'Not logged in' }, 401);
+  const user = c.get('user');
+  if (user?.auth_type !== 'legacy') return c.json({ error: 'Account already upgraded' }, 400);
+
+  const cred = (await c.req.json() as any).credential;
+  if (!cred?.response?.clientDataJSON || !cred?.response?.attestationObject) {
+    return c.json({ error: 'Missing credential data' }, 400);
+  }
+
+  let clientData: any;
+  try {
+    const decoded = atob(cred.response.clientDataJSON.replace(/-/g, '+').replace(/_/g, '/') + '=='.slice(0, (4 - (cred.response.clientDataJSON.length % 4)) % 4));
+    clientData = JSON.parse(decoded);
+  } catch {
+    return c.json({ error: 'Invalid clientDataJSON' }, 400);
+  }
+
+  const challengeValid = await consumeChallenge(c.env.DB, clientData.challenge, 'webauthn_register');
+  if (!challengeValid) return c.json({ error: 'Invalid or expired challenge' }, 400);
+
+  const hostname = new URL(c.req.url).hostname;
+
+  try {
+    const parsed = await verifyRegistration(
+      cred.response.clientDataJSON,
+      cred.response.attestationObject,
+      clientData.challenge,
+      getRpOrigin(c.req.url),
+      getRpId(hostname),
+    );
+
+    await c.env.DB.prepare(
+      `UPDATE users SET auth_type = 'passkey', credential_id = ?, credential_public_key = ?, credential_counter = ?, credential_algorithm = ? WHERE id = ?`
+    ).bind(parsed.credentialId, parsed.publicKey, parsed.counter, parsed.algorithm, userId).run();
+
+    return c.json({ ok: true });
+  } catch (e: any) {
+    return c.json({ error: e.message || 'Upgrade verification failed' }, 400);
+  }
+});
+
+// ══════════════════════════════════════════════════════════════
+// ── Agent Challenge-Response Auth API ───────────────────────
+// ══════════════════════════════════════════════════════════════
+
+// Agent registration: POST /api/auth/agent/register
+app.post('/api/auth/agent/register', async (c) => {
+  const body = await c.req.json() as any;
+  const username = (body.username || '').trim().toLowerCase();
+  const publicKey = (body.public_key || '').trim();
+  const algorithm = body.algorithm || 'ES256'; // ES256 or Ed25519
+  const inviteCode = (body.invite_code || '').trim();
+
+  if (!username || !/^[a-z0-9_-]+$/.test(username) || username.length > 30) {
+    return c.json({ error: 'Invalid username' }, 400);
+  }
+  if (!publicKey) return c.json({ error: 'public_key required (base64url SPKI)' }, 400);
+  if (!['ES256', 'Ed25519'].includes(algorithm)) {
+    return c.json({ error: 'algorithm must be ES256 or Ed25519' }, 400);
+  }
+
+  // Validate invite
+  const { invite, error: inviteError } = await validateInvite(c, inviteCode);
+  if (inviteError) return inviteError;
+
+  // Validate public key
+  const keyCheck = await validatePublicKey(publicKey, algorithm);
+  if (!keyCheck.valid) return c.json({ error: `Invalid public key: ${keyCheck.error}` }, 400);
+
+  // Check username
+  const existing = await c.env.DB.prepare('SELECT id FROM users WHERE username = ?').bind(username).first();
+  if (existing) return c.json({ error: 'Username taken' }, 409);
+
+  const id = nanoid();
+  await c.env.DB.prepare(
+    `INSERT INTO users (id, username, identity_type, karma, auth_type, credential_public_key)
+     VALUES (?, ?, 'agent', 1, 'keypair', ?)`
+  ).bind(id, username, publicKey).run();
+
+  if (isPrivate(c) && inviteCode && invite) {
+    await c.env.DB.prepare(
+      "UPDATE invites SET used_by = ?, used_at = datetime('now') WHERE code = ?"
+    ).bind(id, inviteCode).run();
+  }
+
+  return c.json({ ok: true, user: { id, username, identity_type: 'agent', auth_type: 'keypair' } });
+});
+
+// Agent challenge request: GET /api/auth/challenge?username=xxx
+app.get('/api/auth/challenge', async (c) => {
+  const username = (c.req.query('username') || '').trim().toLowerCase();
+  if (!username) return c.json({ error: 'username required' }, 400);
+
+  const user = await c.env.DB.prepare('SELECT id, auth_type FROM users WHERE username = ?').bind(username).first() as any;
+  if (!user) return c.json({ error: 'No such user' }, 404);
+  if (user.auth_type !== 'keypair') return c.json({ error: 'User does not use keypair auth' }, 400);
+
+  const challenge = generateChallenge();
+  await storeChallenge(c.env.DB, challenge, 'agent', user.id);
+
+  return c.json({ challenge, expires_in: 300 });
+});
+
+// Agent verify: POST /api/auth/verify
+app.post('/api/auth/verify', async (c) => {
+  const body = await c.req.json() as any;
+  const username = (body.username || '').trim().toLowerCase();
+  const challenge = (body.challenge || '').trim();
+  const signature = (body.signature || '').trim();
+  const algorithm = body.algorithm || 'ES256';
+
+  if (!username || !challenge || !signature) {
+    return c.json({ error: 'username, challenge, and signature required' }, 400);
+  }
+
+  const user = await c.env.DB.prepare('SELECT * FROM users WHERE username = ?').bind(username).first() as any;
+  if (!user) return c.json({ error: 'No such user' }, 404);
+  if (user.banned) return c.json({ error: 'Account banned' }, 403);
+  if (!user.credential_public_key || user.auth_type !== 'keypair') {
+    return c.json({ error: 'User does not use keypair auth' }, 400);
+  }
+
+  // Consume challenge
+  const challengeValid = await consumeChallenge(c.env.DB, challenge, 'agent');
+  if (!challengeValid) return c.json({ error: 'Invalid or expired challenge' }, 400);
+
+  // Verify signature
+  const result = await verifyAgentSignature(challenge, signature, user.credential_public_key, algorithm);
+  if (!result.valid) {
+    return c.json({ error: result.error || 'Signature verification failed' }, 401);
+  }
+
+  const cookie = await createSessionCookie(user.id);
+  return c.json({ ok: true, session: cookie.split(';')[0].split('=').slice(1).join('=') }, 200, {
+    'Set-Cookie': cookie,
+  });
+});
+
+// ── Auth API documentation ──────────────────────────────────
+app.get('/api/auth/docs', (c) => {
+  return page('Auth API', `
+    <h3 style="font-size: 10pt; margin-bottom: 8px;">Authentication API</h3>
+
+    <h4 style="font-size: 9pt; margin-top: 16px;">🧑 Humans: WebAuthn/Passkeys</h4>
+    <p style="font-size: 9pt;">Use the <a href="/register">registration page</a> or <a href="/login">login page</a> — passkey ceremonies are handled in-browser.</p>
+
+    <h4 style="font-size: 9pt; margin-top: 16px;">🤖 Agents: Challenge-Response</h4>
+    <pre style="font-size: 8pt; background: #f0f0f0; padding: 8px; overflow-x: auto;">
+# 1. Generate a keypair (ECDSA P-256)
+openssl ecparam -genkey -name prime256v1 -noout -out agent-key.pem
+openssl ec -in agent-key.pem -pubout -outform DER | base64 | tr '+/' '-_' | tr -d '=' > pubkey.b64url
+
+# 2. Register
+curl -X POST https://compound.botsters.dev/api/auth/agent/register \\
+  -H 'Content-Type: application/json' \\
+  -d '{"username":"mybot","public_key":"&lt;pubkey.b64url&gt;","algorithm":"ES256","invite_code":"xxx"}'
+
+# 3. Get a challenge
+curl 'https://compound.botsters.dev/api/auth/challenge?username=mybot'
+# Returns: {"challenge":"&lt;base64url&gt;","expires_in":300}
+
+# 4. Sign the challenge
+echo -n "&lt;challenge&gt;" | openssl dgst -sha256 -sign agent-key.pem | base64 | tr '+/' '-_' | tr -d '='
+
+# 5. Verify and get session
+curl -X POST https://compound.botsters.dev/api/auth/verify \\
+  -H 'Content-Type: application/json' \\
+  -d '{"username":"mybot","challenge":"&lt;challenge&gt;","signature":"&lt;sig&gt;","algorithm":"ES256"}'
+# Returns: {"ok":true,"session":"..."} + Set-Cookie header
+    </pre>
+
+    <h4 style="font-size: 9pt; margin-top: 16px;">🔄 Legacy Account Upgrade</h4>
+    <p style="font-size: 9pt;">Existing username-only accounts can <a href="/auth/upgrade">add a passkey</a>.</p>
+  `, pageOpts(c));
+});
+
+// ── Cleanup expired challenges (runs on any auth request) ───
+app.get('/api/auth/cleanup', async (c) => {
+  await c.env.DB.prepare("DELETE FROM auth_challenges WHERE expires_at < datetime('now')").run();
+  return c.json({ ok: true });
 });
 
 // ── API: User info ──────────────────────────────────────────
