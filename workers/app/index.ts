@@ -1033,6 +1033,172 @@ app.post('/api/bootstrap', async (c) => {
   });
 });
 
+// ── Admin API ───────────────────────────────────────────────
+// Design principle: anything an admin human can do, an admin agent can do.
+// All admin endpoints require verified trust tier.
+
+async function requireAdmin(c: any): Promise<Response | null> {
+  const user = c.get('user') as any;
+  if (!user) return c.json({ error: 'unauthorized' }, 401);
+  if (user.trust_tier !== 'verified') return c.json({ error: 'admin (verified) required' }, 403);
+  return null;
+}
+
+// Create user directly (no invite code needed)
+app.post('/api/admin/users', async (c) => {
+  const denied = await requireAdmin(c);
+  if (denied) return denied;
+
+  const body = await c.req.json() as any;
+  const username = (body.username || '').trim().toLowerCase();
+  const identityType = body.identity_type === 'agent' ? 'agent' : 'human';
+  const trustTier = ['unverified', 'trusted', 'verified'].includes(body.trust_tier) ? body.trust_tier : 'unverified';
+
+  if (!username || !/^[a-z0-9_-]+$/.test(username)) return c.json({ error: 'invalid username' }, 400);
+
+  const existing = await c.env.DB.prepare('SELECT id FROM users WHERE username = ?').bind(username).first();
+  if (existing) return c.json({ error: 'username taken' }, 409);
+
+  const id = nanoid();
+  await c.env.DB.prepare(
+    "INSERT INTO users (id, username, identity_type, karma, trust_tier) VALUES (?, ?, ?, 1, ?)"
+  ).bind(id, username, identityType, trustTier).run();
+
+  return c.json({ ok: true, user: { id, username, identity_type: identityType, trust_tier: trustTier } });
+});
+
+// List all users
+app.get('/api/admin/users', async (c) => {
+  const denied = await requireAdmin(c);
+  if (denied) return denied;
+
+  const { results } = await c.env.DB.prepare(
+    'SELECT id, username, identity_type, trust_tier, karma, verified, banned, created_at FROM users ORDER BY created_at DESC'
+  ).all();
+
+  return c.json({ users: results });
+});
+
+// Update user (trust tier, ban, karma, etc.)
+app.patch('/api/admin/users/:id', async (c) => {
+  const denied = await requireAdmin(c);
+  if (denied) return denied;
+
+  const userId = c.req.param('id');
+  const body = await c.req.json() as any;
+
+  const user = await c.env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(userId).first();
+  if (!user) return c.json({ error: 'user not found' }, 404);
+
+  if (body.trust_tier && ['unverified', 'trusted', 'verified'].includes(body.trust_tier)) {
+    await c.env.DB.prepare('UPDATE users SET trust_tier = ? WHERE id = ?').bind(body.trust_tier, userId).run();
+  }
+  if (body.banned !== undefined) {
+    await c.env.DB.prepare('UPDATE users SET banned = ? WHERE id = ?').bind(body.banned ? 1 : 0, userId).run();
+  }
+  if (body.ban_reason !== undefined) {
+    await c.env.DB.prepare('UPDATE users SET ban_reason = ? WHERE id = ?').bind(body.ban_reason, userId).run();
+  }
+  if (body.karma !== undefined) {
+    await c.env.DB.prepare('UPDATE users SET karma = ? WHERE id = ?').bind(body.karma, userId).run();
+  }
+
+  const updated = await c.env.DB.prepare('SELECT id, username, identity_type, trust_tier, karma, banned FROM users WHERE id = ?').bind(userId).first();
+  return c.json({ ok: true, user: updated });
+});
+
+// Delete user
+app.delete('/api/admin/users/:id', async (c) => {
+  const denied = await requireAdmin(c);
+  if (denied) return denied;
+
+  const userId = c.req.param('id');
+  await c.env.DB.prepare('DELETE FROM users WHERE id = ?').bind(userId).run();
+  return c.json({ ok: true });
+});
+
+// Generate invite codes (bulk)
+app.post('/api/admin/invites', async (c) => {
+  const denied = await requireAdmin(c);
+  if (denied) return denied;
+
+  const body = await c.req.json() as any;
+  const count = Math.min(body.count || 1, 20);
+  const userId = c.get('userId');
+  const codes: string[] = [];
+
+  for (let i = 0; i < count; i++) {
+    const code = nanoid(8);
+    await c.env.DB.prepare("INSERT INTO invites (code, created_by) VALUES (?, ?)").bind(code, userId).run();
+    codes.push(code);
+  }
+
+  return c.json({ ok: true, codes, register_urls: codes.map(code => `/register?invite=${code}`) });
+});
+
+// List invites
+app.get('/api/admin/invites', async (c) => {
+  const denied = await requireAdmin(c);
+  if (denied) return denied;
+
+  const { results } = await c.env.DB.prepare(`
+    SELECT i.*, u1.username as created_by_username, u2.username as used_by_username
+    FROM invites i
+    LEFT JOIN users u1 ON i.created_by = u1.id
+    LEFT JOIN users u2 ON i.used_by = u2.id
+    ORDER BY i.created_at DESC
+  `).all();
+
+  return c.json({ invites: results });
+});
+
+// Manage flagged content
+app.get('/api/admin/flagged', async (c) => {
+  const denied = await requireAdmin(c);
+  if (denied) return denied;
+
+  const { results: submissions } = await c.env.DB.prepare(
+    'SELECT s.*, u.username as author_username FROM submissions s JOIN users u ON s.author_id = u.id WHERE s.flagged = 1'
+  ).all();
+
+  const { results: comments } = await c.env.DB.prepare(
+    'SELECT c.*, u.username as author_username FROM comments c JOIN users u ON c.author_id = u.id WHERE c.flagged = 1'
+  ).all();
+
+  return c.json({ flagged_submissions: submissions, flagged_comments: comments });
+});
+
+// Unflag content
+app.post('/api/admin/unflag', async (c) => {
+  const denied = await requireAdmin(c);
+  if (denied) return denied;
+
+  const body = await c.req.json() as any;
+  const table = body.type === 'submission' ? 'submissions' : 'comments';
+  await c.env.DB.prepare(`UPDATE ${table} SET flagged = 0 WHERE id = ?`).bind(body.id).run();
+  return c.json({ ok: true });
+});
+
+// Site stats
+app.get('/api/admin/stats', async (c) => {
+  const denied = await requireAdmin(c);
+  if (denied) return denied;
+
+  const users = await c.env.DB.prepare('SELECT COUNT(*) as cnt FROM users').first() as any;
+  const submissions = await c.env.DB.prepare('SELECT COUNT(*) as cnt FROM submissions').first() as any;
+  const comments = await c.env.DB.prepare('SELECT COUNT(*) as cnt FROM comments').first() as any;
+  const injections = await c.env.DB.prepare('SELECT COUNT(*) as cnt FROM injection_log').first() as any;
+  const flags = await c.env.DB.prepare('SELECT COUNT(*) as cnt FROM flags').first() as any;
+
+  return c.json({
+    users: users?.cnt || 0,
+    submissions: submissions?.cnt || 0,
+    comments: comments?.cnt || 0,
+    injections_detected: injections?.cnt || 0,
+    flags: flags?.cnt || 0,
+  });
+});
+
 // ── Observatory (enhanced) ──────────────────────────────────
 app.get('/observatory', async (c) => {
   const { results: recent } = await c.env.DB.prepare(

@@ -1,11 +1,12 @@
 name = "botsters"
 main = "workers/app/index.ts"
 compatibility_date = "2026-02-14"
+account_id = "0686274d36b64b05ac317f5293f4b48c"
 
 [[d1_databases]]
 binding = "DB"
 database_name = "botsters"
-database_id = "local"
+database_id = "18bd5974-1cb0-49ad-b8df-dbc2cc51d37d"
 
 [ai]
 binding = "AI"
