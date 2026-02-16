@@ -1,0 +1,17 @@
+name = "botsters-wire"
+main = "workers/app/index.ts"
+compatibility_date = "2026-02-14"
+account_id = "0686274d36b64b05ac317f5293f4b48c"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "botsters-public"
+database_id = "f9772dfa-305e-42c7-9a18-a89746f5e350"
+
+[ai]
+binding = "AI"
+
+[vars]
+ENVIRONMENT = "production"
+PRIVATE_MODE = "false"
+TRUST_SECRET = "botsters-trust-secret-change-in-prod"
