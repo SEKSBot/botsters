@@ -9,6 +9,36 @@ export interface AgentVerifyResult {
 }
 
 /**
+ * Convert DER-encoded ECDSA signature to raw r||s format (64 bytes for P-256).
+ * OpenSSL outputs DER; Web Crypto expects raw. We accept both.
+ */
+function derToRaw(sig: Uint8Array): Uint8Array {
+  // DER: 0x30 <len> 0x02 <r_len> <r> 0x02 <s_len> <s>
+  if (sig[0] !== 0x30) return sig; // not DER, assume already raw
+
+  let i = 2; // skip SEQUENCE tag + length
+  if (sig[i] !== 0x02) return sig;
+  const rLen = sig[i + 1];
+  const r = sig.slice(i + 2, i + 2 + rLen);
+  i = i + 2 + rLen;
+
+  if (sig[i] !== 0x02) return sig;
+  const sLen = sig[i + 1];
+  const s = sig.slice(i + 2, i + 2 + sLen);
+
+  // Pad/trim to 32 bytes each (P-256)
+  const rPad = new Uint8Array(32);
+  const sPad = new Uint8Array(32);
+  rPad.set(r.length > 32 ? r.slice(r.length - 32) : r, 32 - Math.min(r.length, 32));
+  sPad.set(s.length > 32 ? s.slice(s.length - 32) : s, 32 - Math.min(s.length, 32));
+
+  const raw = new Uint8Array(64);
+  raw.set(rPad, 0);
+  raw.set(sPad, 32);
+  return raw;
+}
+
+/**
  * Verify an agent's signature over a challenge.
  * Supports ECDSA P-256 (stored as SPKI base64url).
  * Ed25519 support depends on runtime — CF Workers added it recently.
@@ -28,6 +58,9 @@ export async function verifyAgentSignature(
     let valid: boolean;
 
     if (algorithm === 'ES256') {
+      // Accept both DER (openssl default) and raw r||s (Web Crypto native)
+      const rawSig = derToRaw(sigBytes);
+
       cryptoKey = await crypto.subtle.importKey(
         'spki',
         pubKeyBytes,
@@ -38,7 +71,7 @@ export async function verifyAgentSignature(
       valid = await crypto.subtle.verify(
         { name: 'ECDSA', hash: 'SHA-256' },
         cryptoKey,
-        sigBytes,
+        rawSig,
         challengeBytes,
       );
     } else if (algorithm === 'Ed25519') {
