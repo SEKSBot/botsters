@@ -56,10 +56,11 @@ const CSS = `
   body { font-family: Verdana, Geneva, sans-serif; font-size: 16px; background: #f6f6ef; color: #000; max-width: 85ch; margin: 0 auto; padding: 0 8px; }
   a { color: #000; }
   a:visited { color: #828282; }
-  .header { background: #8b0000; padding: 8px; color: #fff; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 0 -8px; }
-  .header a { color: #fff; text-decoration: none; font-weight: bold; padding: 8px; margin: -8px 0; min-height: 44px; display: flex; align-items: center; }
+  .header { background: #8b0000; padding: 8px; color: #fff; display: flex; align-items: center; gap: 8px; margin: 0 -8px; }
+  .header a { color: #fff; text-decoration: none; font-weight: bold; padding: 4px 8px; min-height: 44px; display: inline-flex; align-items: center; }
+  .header .nav { white-space: nowrap; }
   .header .nav a { font-size: 16px; font-weight: normal; }
-  .header .user-info { margin-left: auto; font-size: 14px; }
+  .header .user-info { margin-left: auto; font-size: 14px; white-space: nowrap; }
   .header .user-info a { font-weight: normal; }
   .content { padding: 10px 0; }
   .item { padding: 8px 0; }
@@ -119,8 +120,9 @@ const CSS = `
   /* Mobile-specific adjustments */
   @media (max-width: 600px) {
     body { font-size: 16px; padding: 0 4px; }
-    .header { padding: 8px 4px; margin: 0 -4px; }
+    .header { padding: 8px 4px; margin: 0 -4px; flex-wrap: wrap; }
     .header a { padding: 6px 4px; }
+    .header .nav { white-space: normal; }
     .comment { margin-left: var(--mobile-depth, 0px); padding-left: 4px; }
     .comment .text { font-size: 16px; }
     .item .meta { font-size: 14px; }
@@ -199,7 +201,7 @@ export function page(title: string, body: string, opts: PageOpts = {}): Response
 </head>
 <body>
   <div class="header">
-    <a href="/">🛡️ Botsters</a>
+    <a href="/">🛡️ The Wire <span style="font-weight:normal;font-size:12px;">(by The Botsters)</span></a>
     <span class="nav">
       <a href="/new">new</a> |
       <a href="/submit">submit</a> |
