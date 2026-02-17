@@ -426,6 +426,223 @@ POST /api/auth/verify
   return page('Guidelines', content, pageOpts(c));
 });
 
+// ── HN Profile Verification Invite System ───────────────────
+// Proves the user controls a real HN account by placing a token in their profile.
+
+app.get('/request-invite', (c) => {
+  const content = `
+    <h2 style="font-size: 12pt; color: #8b0000; margin-bottom: 16px;">Request an Invite via Hacker News</h2>
+    <p style="font-size: 9pt; line-height: 1.6; margin-bottom: 16px;">
+      Prove you're a real HN user to get an invite to The Wire. Here's how it works:
+    </p>
+    <ol style="font-size: 9pt; line-height: 1.8; margin-left: 20px; margin-bottom: 16px;">
+      <li>Enter your Hacker News username below</li>
+      <li>We'll give you a verification token</li>
+      <li>Add the token to your <a href="https://news.ycombinator.com/user" target="_blank">HN profile's "about" field</a></li>
+      <li>Click "Verify" — we'll check your profile</li>
+      <li>Get your invite code instantly</li>
+    </ol>
+    <form method="POST" action="/request-invite" style="margin-top: 16px;">
+      <label style="font-size: 9pt;">HN Username:</label><br>
+      <input type="text" name="hn_username" required pattern="[a-zA-Z0-9_-]+" maxlength="30"
+        style="font-size: 14px; padding: 6px; margin: 4px 0 12px 0; width: 250px;">
+      <br>
+      <button type="submit" style="background: #8b0000; color: #fff; border: none; padding: 8px 16px; cursor: pointer; font-size: 14px;">
+        Get Verification Token
+      </button>
+    </form>
+    <p style="font-size: 8pt; color: #828282; margin-top: 20px;">
+      You can remove the token from your HN profile after verification. We store your HN username to prevent duplicate invites.
+    </p>`;
+  return page('Request Invite', content, pageOpts(c));
+});
+
+app.post('/request-invite', async (c) => {
+  const ip = c.req.header('cf-connecting-ip') || c.req.header('x-forwarded-for') || 'unknown';
+  
+  // Rate limit: 5 requests per IP per hour
+  const rl = await checkRateLimit(c.env.DB, `ip:hn-verify:${ip}`, 3600, 5);
+  if (!rl.allowed) return rateLimitResponse(3600);
+
+  const body = await c.req.parseBody();
+  const hnUsername = (body.hn_username as string || '').trim();
+  
+  if (!hnUsername || !/^[a-zA-Z0-9_-]+$/.test(hnUsername) || hnUsername.length > 30) {
+    return page('Error', '<p style="font-size:9pt;">Invalid HN username.</p>', pageOpts(c));
+  }
+
+  // Check if already verified
+  const existing = await c.env.DB.prepare(
+    "SELECT * FROM hn_verifications WHERE hn_username = ? AND status IN ('verified', 'used')"
+  ).bind(hnUsername).first();
+  if (existing) {
+    return page('Already Verified', '<p style="font-size:9pt;">This HN account has already been verified. If you lost your invite code, contact an admin.</p>', pageOpts(c));
+  }
+
+  // Check for pending (reuse token if exists)
+  let pending = await c.env.DB.prepare(
+    "SELECT * FROM hn_verifications WHERE hn_username = ? AND status = 'pending'"
+  ).bind(hnUsername).first() as any;
+
+  let token: string;
+  let verificationId: string;
+
+  if (pending) {
+    token = pending.token;
+    verificationId = pending.id;
+  } else {
+    token = 'wire-verify-' + nanoid(8);
+    verificationId = nanoid();
+    await c.env.DB.prepare(
+      "INSERT INTO hn_verifications (id, hn_username, token, ip_address) VALUES (?, ?, ?, ?)"
+    ).bind(verificationId, hnUsername, token, ip).run();
+  }
+
+  const content = `
+    <h2 style="font-size: 12pt; color: #8b0000; margin-bottom: 16px;">Step 2: Add Token to Your HN Profile</h2>
+    <p style="font-size: 9pt; line-height: 1.6; margin-bottom: 12px;">
+      Add this token anywhere in your <a href="https://news.ycombinator.com/user?id=${escapeHtml(hnUsername)}" target="_blank">HN profile's "about" field</a>:
+    </p>
+    <pre style="font-size: 14px; background: #f5f5f5; padding: 12px; border: 2px solid #8b0000; user-select: all; margin-bottom: 16px;">${escapeHtml(token)}</pre>
+    <p style="font-size: 9pt; line-height: 1.6; margin-bottom: 16px;">
+      Once added, click the button below. You can remove it from your profile after verification.
+    </p>
+    <form method="POST" action="/verify-hn">
+      <input type="hidden" name="hn_username" value="${escapeHtml(hnUsername)}">
+      <input type="hidden" name="token" value="${escapeHtml(token)}">
+      <button type="submit" style="background: #8b0000; color: #fff; border: none; padding: 10px 20px; cursor: pointer; font-size: 14px;">
+        ✓ I've added the token — Verify Now
+      </button>
+    </form>`;
+  return page('Verify HN Profile', content, pageOpts(c));
+});
+
+app.post('/verify-hn', async (c) => {
+  const ip = c.req.header('cf-connecting-ip') || c.req.header('x-forwarded-for') || 'unknown';
+  
+  // Rate limit
+  const rl = await checkRateLimit(c.env.DB, `ip:hn-check:${ip}`, 900, 10);
+  if (!rl.allowed) return rateLimitResponse(900);
+
+  const body = await c.req.parseBody();
+  const hnUsername = (body.hn_username as string || '').trim();
+  const token = (body.token as string || '').trim();
+
+  if (!hnUsername || !token) {
+    return page('Error', '<p style="font-size:9pt;">Missing username or token.</p>', pageOpts(c));
+  }
+
+  // Verify the token exists in our DB
+  const verification = await c.env.DB.prepare(
+    "SELECT * FROM hn_verifications WHERE hn_username = ? AND token = ? AND status = 'pending'"
+  ).bind(hnUsername, token).first() as any;
+  if (!verification) {
+    return page('Error', '<p style="font-size:9pt;">Invalid or expired verification request. <a href="/request-invite">Try again</a>.</p>', pageOpts(c));
+  }
+
+  // Fetch HN profile via Firebase API
+  let hnProfile: any;
+  try {
+    const resp = await fetch(`https://hacker-news.firebaseio.com/v0/user/${encodeURIComponent(hnUsername)}.json`);
+    if (!resp.ok) throw new Error('HN API error');
+    hnProfile = await resp.json();
+  } catch (e) {
+    return page('Error', '<p style="font-size:9pt;">Could not fetch your HN profile. Please try again in a moment.</p>', pageOpts(c));
+  }
+
+  if (!hnProfile || !hnProfile.id) {
+    return page('Error', '<p style="font-size:9pt;">HN user not found. Check your username and <a href="/request-invite">try again</a>.</p>', pageOpts(c));
+  }
+
+  // Check if token is in the about field
+  const about = hnProfile.about || '';
+  if (!about.includes(token)) {
+    const content = `
+      <h2 style="font-size: 12pt; color: #8b0000; margin-bottom: 16px;">Token Not Found</h2>
+      <p style="font-size: 9pt; line-height: 1.6; margin-bottom: 12px;">
+        We couldn't find <code>${escapeHtml(token)}</code> in your HN profile's "about" field.
+      </p>
+      <p style="font-size: 9pt; line-height: 1.6; margin-bottom: 16px;">
+        Make sure you've saved your profile after adding the token. HN's API may take a minute to update.
+      </p>
+      <form method="POST" action="/verify-hn">
+        <input type="hidden" name="hn_username" value="${escapeHtml(hnUsername)}">
+        <input type="hidden" name="token" value="${escapeHtml(token)}">
+        <button type="submit" style="background: #8b0000; color: #fff; border: none; padding: 10px 20px; cursor: pointer; font-size: 14px;">
+          Try Again
+        </button>
+      </form>`;
+    return page('Not Yet Verified', content, pageOpts(c));
+  }
+
+  // Verified! Generate invite code
+  const inviteCode = nanoid(8);
+  const userId = c.get('userId');
+  const createdBy = userId || verification.id;
+  
+  await c.env.DB.prepare("INSERT INTO invites (code, created_by) VALUES (?, ?)").bind(inviteCode, createdBy).run();
+
+  // Update verification record
+  await c.env.DB.prepare(
+    "UPDATE hn_verifications SET status = 'verified', invite_code = ?, hn_karma = ?, hn_created = ?, verified_at = CURRENT_TIMESTAMP WHERE id = ?"
+  ).bind(inviteCode, hnProfile.karma || 0, hnProfile.created || 0, verification.id).run();
+
+  const hnAge = hnProfile.created ? Math.floor((Date.now() / 1000 - hnProfile.created) / 86400) : 0;
+
+  const content = `
+    <h2 style="font-size: 12pt; color: #228b22; margin-bottom: 16px;">✓ Verified!</h2>
+    <p style="font-size: 9pt; line-height: 1.6; margin-bottom: 8px;">
+      Welcome, <strong>${escapeHtml(hnProfile.id)}</strong> (${hnProfile.karma || 0} karma, ${hnAge} days on HN).
+    </p>
+    <p style="font-size: 9pt; line-height: 1.6; margin-bottom: 16px;">
+      Here's your invite code:
+    </p>
+    <pre style="font-size: 16px; background: #f5f5f5; padding: 12px; border: 2px solid #228b22; user-select: all; margin-bottom: 16px;">${escapeHtml(inviteCode)}</pre>
+    <p style="font-size: 9pt; line-height: 1.6; margin-bottom: 16px;">
+      <a href="/register?invite=${escapeHtml(inviteCode)}" style="color: #8b0000; font-weight: bold;">→ Register now with this code</a>
+    </p>
+    <p style="font-size: 8pt; color: #828282;">
+      You can now remove the token from your HN profile. This code can only be used once.
+    </p>`;
+  return page('Verified!', content, pageOpts(c));
+});
+
+// Admin: view HN verifications
+app.get('/admin/hn-verifications', async (c) => {
+  const denied = await requireAdmin(c);
+  if (denied) return denied;
+
+  const { results } = await c.env.DB.prepare(
+    'SELECT * FROM hn_verifications ORDER BY created_at DESC LIMIT 100'
+  ).all();
+
+  let rows = '';
+  for (const v of results as any[]) {
+    const statusColor = v.status === 'verified' ? '#228b22' : v.status === 'used' ? '#828282' : '#8b0000';
+    rows += `<tr>
+      <td>${escapeHtml(v.hn_username)}</td>
+      <td>${v.hn_karma || '?'}</td>
+      <td style="color:${statusColor};font-weight:bold;">${v.status}</td>
+      <td style="font-size:7pt;">${v.invite_code || '-'}</td>
+      <td style="font-size:7pt;">${v.created_at}</td>
+    </tr>`;
+  }
+
+  const content = `
+    <h2 style="font-size: 12pt; color: #8b0000; margin-bottom: 16px;">HN Verifications</h2>
+    <table style="font-size: 9pt; border-collapse: collapse; width: 100%;">
+      <tr style="border-bottom: 1px solid #ccc;">
+        <th style="text-align:left;padding:4px;">HN User</th>
+        <th style="text-align:left;padding:4px;">Karma</th>
+        <th style="text-align:left;padding:4px;">Status</th>
+        <th style="text-align:left;padding:4px;">Invite</th>
+        <th style="text-align:left;padding:4px;">Requested</th>
+      </tr>
+      ${rows}
+    </table>`;
+  return page('Admin: HN Verifications', content, pageOpts(c));
+});
+
 // ── Research Page ───────────────────────────────────────────
 app.get('/research', async (c) => {
   // Get Observatory stats for inline display

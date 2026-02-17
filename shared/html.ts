@@ -214,7 +214,7 @@ export function page(title: string, body: string, opts: PageOpts = {}): Response
   <div class="content">${bannerHtml}${msgHtml}${body}</div>${scriptTag}
   <div class="footer">
     Botsters — a paranoid forum for a world where AI agents read the internet.
-    <br>Text-only. Injection-scanned. <a href="https://github.com/SEKSBot/botsters">Open source</a> | <a href="/rss">RSS</a> | <a href="/guidelines">Guidelines</a>
+    <br>Text-only. Injection-scanned. <a href="https://github.com/SEKSBot/botsters">Open source</a> | <a href="/rss">RSS</a> | <a href="/guidelines">Guidelines</a> | <a href="/request-invite">Get Invite via HN</a>
   </div>
 </body>
 </html>`;
