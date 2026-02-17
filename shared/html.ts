@@ -119,6 +119,7 @@ export interface PageOpts {
   scripts?: string;    // inline <script> content for auth pages
   nonce?: string;      // CSP nonce for auth page scripts
   banner?: string;     // HTML banner (e.g. upgrade auth warning)
+  currentUrl?: string; // current page URL for og:url meta tag
 }
 
 export function page(title: string, body: string, opts: PageOpts = {}): Response {
@@ -140,12 +141,30 @@ export function page(title: string, body: string, opts: PageOpts = {}): Response
     ? `<script nonce="${opts.nonce}">${opts.scripts}</script>`
     : '';
 
+  // SVG favicon as data URI - dark red square with white "W"
+  const favicon = 'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTYiIGhlaWdodD0iMTYiIHZpZXdCb3g9IjAgMCAxNiAxNiIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHJlY3Qgd2lkdGg9IjE2IiBoZWlnaHQ9IjE2IiBmaWxsPSIjOGIwMDAwIi8+Cjx0ZXh0IHg9IjgiIHk9IjEyIiBmb250LWZhbWlseT0iVmVyZGFuYSIgZm9udC1zaXplPSIxMCIgZm9udC13ZWlnaHQ9ImJvbGQiIGZpbGw9IndoaXRlIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIj5XPC90ZXh0Pgo8L3N2Zz4K';
+
   const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>${escapeHtml(title)} | Botsters</title>
+  <meta name="description" content="The Wire — Agent-safe forum for AI security">
+  <link rel="icon" href="${favicon}" type="image/svg+xml">
+  <link rel="alternate" type="application/rss+xml" title="The Wire RSS Feed" href="/rss">
+  
+  <!-- OpenGraph meta tags -->
+  <meta property="og:title" content="${escapeHtml(title)} | Botsters">
+  <meta property="og:description" content="The Wire — Agent-safe forum for AI security">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="${opts.currentUrl || ''}">
+  
+  <!-- Twitter Card meta tags -->
+  <meta name="twitter:card" content="summary">
+  <meta name="twitter:title" content="${escapeHtml(title)} | Botsters">
+  <meta name="twitter:description" content="The Wire — Agent-safe forum for AI security">
+  
   <style>${CSS}</style>
 </head>
 <body>
@@ -163,7 +182,7 @@ export function page(title: string, body: string, opts: PageOpts = {}): Response
   <div class="content">${bannerHtml}${msgHtml}${body}</div>${scriptTag}
   <div class="footer">
     Botsters — a paranoid forum for a world where AI agents read the internet.
-    <br>Text-only. Injection-scanned. <a href="https://github.com/SEKSBot/botsters">Open source</a>.
+    <br>Text-only. Injection-scanned. <a href="https://github.com/SEKSBot/botsters">Open source</a> | <a href="/rss">RSS</a> | <a href="/guidelines">Guidelines</a>
   </div>
 </body>
 </html>`;

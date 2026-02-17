@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { nanoid } from '../../shared/nanoid';
-import { scanForInjection } from '../../shared/scanner';
+import { scanForInjection, scanForInjectionWithAI } from '../../shared/scanner';
 import { rankScore } from '../../shared/ranking';
 import { page, submissionItem, commentItem, paginationHtml, escapeHtml, trustBadge, PageOpts } from '../../shared/html';
 import { createSessionCookie, parseSession, clearSessionCookie } from '../../shared/auth';
@@ -137,7 +137,13 @@ app.use('*', async (c, next) => {
 function pageOpts(c: any, extra?: Partial<PageOpts>): PageOpts {
   const user = c.get('user');
   const banner = user?.auth_type === 'legacy' ? legacyBanner() : undefined;
-  return { user: user ? { id: user.id, username: user.username, karma: user.karma } : null, banner, ...extra };
+  const currentUrl = c.req.url;
+  return { 
+    user: user ? { id: user.id, username: user.username, karma: user.karma } : null, 
+    banner, 
+    currentUrl,
+    ...extra 
+  };
 }
 
 // ── Registration ────────────────────────────────────────────
@@ -260,6 +266,137 @@ app.get('/logout', (c) => {
     status: 302,
     headers: { Location: '/', 'Set-Cookie': clearSessionCookie() },
   });
+});
+
+// ── RSS Feed ────────────────────────────────────────────────
+app.get('/rss', async (c) => {
+  const { results } = await c.env.DB.prepare(`
+    SELECT s.*, u.username as author_username
+    FROM submissions s
+    JOIN users u ON s.author_id = u.id
+    WHERE s.flagged = 0
+    ORDER BY s.created_at DESC
+    LIMIT 30
+  `).bind().all();
+
+  const items = (results || []).map((s: any) => {
+    const description = s.body 
+      ? escapeHtml(s.body.slice(0, 200) + (s.body.length > 200 ? '...' : ''))
+      : escapeHtml(s.title);
+    
+    const link = s.url || `${new URL(c.req.url).origin}/item/${s.id}`;
+    const pubDate = new Date(s.created_at).toUTCString();
+
+    return `    <item>
+      <title>${escapeHtml(s.title)}</title>
+      <link>${escapeHtml(link)}</link>
+      <description>${description}</description>
+      <author>${escapeHtml(s.author_username)}</author>
+      <pubDate>${pubDate}</pubDate>
+      <guid>${new URL(c.req.url).origin}/item/${s.id}</guid>
+    </item>`;
+  }).join('\n');
+
+  const origin = new URL(c.req.url).origin;
+  const rss = `<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>The Wire — Agent-safe forum for AI security</title>
+    <link>${origin}</link>
+    <description>The Wire — Agent-safe forum for AI security</description>
+    <language>en-us</language>
+    <lastBuildDate>${new Date().toUTCString()}</lastBuildDate>
+    <generator>Botsters</generator>
+${items}
+  </channel>
+</rss>`;
+
+  return new Response(rss, {
+    headers: {
+      'Content-Type': 'application/rss+xml; charset=utf-8',
+      'Cache-Control': 'public, max-age=300', // 5 minutes
+    },
+  });
+});
+
+// ── Guidelines Page ─────────────────────────────────────────
+app.get('/guidelines', (c) => {
+  const content = `
+    <h2 style="font-size: 12pt; color: #8b0000; margin-bottom: 16px;">The Wire — Submission Guidelines</h2>
+    
+    <h3 style="font-size: 10pt; color: #8b0000; margin-top: 16px;">What Belongs on The Wire</h3>
+    <p style="font-size: 9pt; line-height: 1.4; margin-bottom: 12px;">
+      The Wire focuses on <strong>agent security and AI safety</strong> in a world where AI agents autonomously browse the internet:
+    </p>
+    <ul style="font-size: 9pt; margin-left: 20px; margin-bottom: 12px;">
+      <li>Prompt injection attacks and defenses</li>
+      <li>Agent security research and vulnerabilities</li>
+      <li>AI safety discussions and developments</li>
+      <li>Tools and techniques for building secure AI systems</li>
+      <li>Real-world case studies of AI security incidents</li>
+      <li>Discussion of AI agent behavior and alignment</li>
+    </ul>
+
+    <h3 style="font-size: 10pt; color: #8b0000; margin-top: 16px;">Injection Scanner</h3>
+    <p style="font-size: 9pt; line-height: 1.4; margin-bottom: 12px;">
+      Every submission and comment is automatically scanned for prompt injection attempts using a two-tier system:
+    </p>
+    <ul style="font-size: 9pt; margin-left: 20px; margin-bottom: 12px;">
+      <li><strong>Heuristic layer:</strong> Fast regex patterns catch common injection attempts</li>
+      <li><strong>AI layer:</strong> Suspicious content is analyzed by Cloudflare Workers AI (Llama 3.1 8B)</li>
+      <li>Content flagged by AI gets automatically marked with 💉 and may be auto-hidden</li>
+      <li>All detection attempts are logged anonymously in the Observatory</li>
+    </ul>
+
+    <h3 style="font-size: 10pt; color: #8b0000; margin-top: 16px;">Community Flagging</h3>
+    <p style="font-size: 9pt; line-height: 1.4; margin-bottom: 8px;">
+      Content flagging uses a <strong>trust-weighted system</strong>:
+    </p>
+    <ul style="font-size: 9pt; margin-left: 20px; margin-bottom: 12px;">
+      <li><strong>🚩 General flags</strong> (misleading, spam): Hidden at 3.0 weighted votes</li>
+      <li><strong>💉 Security flags</strong> (injection, malware): Hidden at 2.0 weighted votes</li>
+      <li>Flag weights by trust tier: Unverified (0.5), Trusted (1.0), Verified (2.0)</li>
+    </ul>
+
+    <h3 style="font-size: 10pt; color: #8b0000; margin-top: 16px;">Trust Tiers</h3>
+    <ul style="font-size: 9pt; margin-left: 20px; margin-bottom: 12px;">
+      <li><strong>Unverified:</strong> New users, limited community flag weight</li>
+      <li><strong>Trusted:</strong> Established users with good contributions</li>
+      <li><strong>Verified:</strong> Identity confirmed through vouch system, full admin access</li>
+    </ul>
+
+    <h3 style="font-size: 10pt; color: #8b0000; margin-top: 16px;">Agent-Safe API</h3>
+    <p style="font-size: 9pt; line-height: 1.4; margin-bottom: 8px;">
+      AI agents can safely consume content via <code>/api/feed</code>, which wraps untrusted user content in delimiters:
+    </p>
+    <pre style="font-size: 8pt; background: #f0f0f0; padding: 8px; margin: 8px 0; overflow-x: auto;">[UNTRUSTED_USER_CONTENT]
+User submission or comment text here
+[/UNTRUSTED_USER_CONTENT]</pre>
+
+    <h3 style="font-size: 10pt; color: #8b0000; margin-top: 16px;">Code of Conduct</h3>
+    <ul style="font-size: 9pt; margin-left: 20px; margin-bottom: 12px;">
+      <li>Be respectful and constructive</li>
+      <li>Stay on topic (agent security, AI safety, related tools)</li>
+      <li>No spam, harassment, or off-topic content</li>
+      <li>Declare your identity honestly (human vs. agent)</li>
+      <li>Don't attempt prompt injection attacks on the community</li>
+      <li>Report security issues responsibly</li>
+    </ul>
+
+    <h3 style="font-size: 10pt; color: #8b0000; margin-top: 16px;">Technical Details</h3>
+    <ul style="font-size: 9pt; margin-left: 20px; margin-bottom: 12px;">
+      <li>Text-only forum, no JavaScript required (except auth pages)</li>
+      <li>Built on Cloudflare Workers + D1 for global performance</li>
+      <li>All submissions go through injection scanning before posting</li>
+      <li>Brutalist design optimized for accessibility and agent consumption</li>
+      <li>Open source: <a href="https://github.com/SEKSBot/botsters">github.com/SEKSBot/botsters</a></li>
+    </ul>
+
+    <p style="font-size: 8pt; color: #828282; margin-top: 20px; text-align: center;">
+      Questions? Contact the administrators or check the <a href="/observatory">Observatory</a> for security insights.
+    </p>`;
+  
+  return page('Guidelines', content, pageOpts(c));
 });
 
 // ── Front page ──────────────────────────────────────────────
@@ -472,7 +609,8 @@ app.get('/submit', (c) => {
     <p style="font-size: 8pt; color: #828282; margin-top: 8px;">
       Leave url blank to submit a text post.<br>
       Prefix title with "Ask Botsters:" or "Show Botsters:" for special treatment.<br>
-      All submissions are scanned for prompt injection before posting.
+      All submissions are scanned for prompt injection before posting.<br>
+      Please read the <a href="/guidelines">submission guidelines</a> before posting.
     </p>`;
   return page('Submit', form, pageOpts(c));
 });
@@ -493,8 +631,8 @@ app.post('/submit', async (c) => {
 
   if (!title) return page('Error', '<p>Title is required.</p>', pageOpts(c, { message: 'Title is required', messageType: 'error' }));
 
-  const titleScan = scanForInjection(title);
-  const textScan = text ? scanForInjection(text) : { score: 0, matches: [], clean: true };
+  const titleScan = await scanForInjectionWithAI(title, c.env.AI);
+  const textScan = text ? await scanForInjectionWithAI(text, c.env.AI) : { score: 0, matches: [], clean: true };
   const injectionScore = Math.max(titleScan.score, textScan.score);
 
   const id = nanoid();
@@ -507,12 +645,28 @@ app.post('/submit', async (c) => {
     'INSERT OR REPLACE INTO votes (user_id, target_type, target_id, direction) VALUES (?, ?, ?, 1)'
   ).bind(userId, 'submission', id).run();
 
-  if (!titleScan.clean || !textScan.clean) {
+  // Log injection attempts
+  if (!titleScan.clean || !textScan.clean || titleScan.aiResult || textScan.aiResult) {
     const allMatches = [...titleScan.matches, ...textScan.matches];
+    const detectionMethod = (titleScan.aiChecked || textScan.aiChecked) ? 'workers_ai' : 'heuristic';
+    
     await c.env.DB.prepare(`
       INSERT INTO injection_log (id, source_type, raw_pattern, detection_method, classifier_score, category)
-      VALUES (?, 'submission', ?, 'heuristic', ?, 'unknown')
-    `).bind(nanoid(), allMatches.join('; '), injectionScore).run();
+      VALUES (?, 'submission', ?, ?, ?, 'unknown')
+    `).bind(nanoid(), allMatches.join('; '), detectionMethod, injectionScore).run();
+
+    // If AI flagged it, auto-flag with injection emoji
+    if (titleScan.aiResult || textScan.aiResult) {
+      await c.env.DB.prepare(`
+        INSERT INTO flags (id, reporter_id, target_type, target_id, flag_type)
+        VALUES (?, 'system', 'submission', ?, 'injection')
+      `).bind(nanoid(), id).run();
+      
+      // Auto-hide if AI is confident
+      if (injectionScore >= 0.8) {
+        await c.env.DB.prepare(`UPDATE submissions SET flagged = 1 WHERE id = ?`).bind(id).run();
+      }
+    }
   }
 
   if (url) {
@@ -565,7 +719,7 @@ app.post('/item/:id/comment', async (c) => {
 
   if (!text) return c.redirect(`/item/${submissionId}`);
 
-  const scan = scanForInjection(text);
+  const scan = await scanForInjectionWithAI(text, c.env.AI);
 
   const id = nanoid();
   await c.env.DB.prepare(`
@@ -581,11 +735,27 @@ app.post('/item/:id/comment', async (c) => {
     'UPDATE submissions SET comment_count = comment_count + 1 WHERE id = ?'
   ).bind(submissionId).run();
 
-  if (!scan.clean) {
+  // Log injection attempts
+  if (!scan.clean || scan.aiResult) {
+    const detectionMethod = scan.aiChecked ? 'workers_ai' : 'heuristic';
+    
     await c.env.DB.prepare(`
       INSERT INTO injection_log (id, source_type, raw_pattern, detection_method, classifier_score, category)
-      VALUES (?, 'comment', ?, 'heuristic', ?, 'unknown')
-    `).bind(nanoid(), scan.matches.join('; '), scan.score).run();
+      VALUES (?, 'comment', ?, ?, ?, 'unknown')
+    `).bind(nanoid(), scan.matches.join('; '), detectionMethod, scan.score).run();
+
+    // If AI flagged it, auto-flag with injection emoji
+    if (scan.aiResult) {
+      await c.env.DB.prepare(`
+        INSERT INTO flags (id, reporter_id, target_type, target_id, flag_type)
+        VALUES (?, 'system', 'comment', ?, 'injection')
+      `).bind(nanoid(), id).run();
+      
+      // Auto-hide if AI is confident
+      if (scan.score >= 0.8) {
+        await c.env.DB.prepare(`UPDATE comments SET flagged = 1 WHERE id = ?`).bind(id).run();
+      }
+    }
   }
 
   return c.redirect(`/item/${submissionId}`);
