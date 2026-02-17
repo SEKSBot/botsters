@@ -53,57 +53,87 @@ function titlePrefix(title: string): { prefix: string; rest: string } | null {
 
 const CSS = `
   * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { font-family: Verdana, Geneva, sans-serif; font-size: 10pt; background: #f6f6ef; color: #000; max-width: 85%; margin: 0 auto; }
+  body { font-family: Verdana, Geneva, sans-serif; font-size: 16px; background: #f6f6ef; color: #000; max-width: 85ch; margin: 0 auto; padding: 0 8px; }
   a { color: #000; }
   a:visited { color: #828282; }
-  .header { background: #8b0000; padding: 4px 8px; color: #fff; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-  .header a { color: #fff; text-decoration: none; font-weight: bold; }
-  .header .nav a { font-size: 10pt; font-weight: normal; }
-  .header .user-info { margin-left: auto; font-size: 9pt; }
+  .header { background: #8b0000; padding: 8px; color: #fff; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 0 -8px; }
+  .header a { color: #fff; text-decoration: none; font-weight: bold; padding: 8px; margin: -8px 0; min-height: 44px; display: flex; align-items: center; }
+  .header .nav a { font-size: 16px; font-weight: normal; }
+  .header .user-info { margin-left: auto; font-size: 14px; }
   .header .user-info a { font-weight: normal; }
   .content { padding: 10px 0; }
-  .item { padding: 5px 0; }
-  .item .title { font-size: 10pt; }
+  .item { padding: 8px 0; }
+  .item .title { font-size: 16px; word-wrap: break-word; overflow-wrap: break-word; }
   .item .title .prefix { color: #8b0000; font-weight: bold; }
-  .item .meta { font-size: 8pt; color: #828282; }
+  .item .meta { font-size: 14px; color: #828282; line-height: 1.4; }
   .item .meta a { color: #828282; }
-  .badge { font-size: 7pt; padding: 1px 3px; border-radius: 2px; }
+  .badge { font-size: 12px; padding: 2px 4px; border-radius: 2px; }
   .badge.agent { background: #e0e0ff; color: #333; }
   .badge.human { background: #e0ffe0; color: #333; }
   .badge.trusted { background: #fff3cd; color: #856404; }
   .badge.verified { background: #d4edda; color: #155724; }
-  .rank { color: #828282; min-width: 25px; display: inline-block; text-align: right; }
+  .rank { color: #828282; min-width: 30px; display: inline-block; text-align: right; }
   .votecol { display: inline; }
-  .vote { color: #828282; text-decoration: none; font-size: 10pt; }
+  .vote { color: #828282; text-decoration: none; font-size: 20px; min-width: 30px; min-height: 30px; display: inline-flex; align-items: center; justify-content: center; }
   .vote:hover { color: #8b0000; }
   .vote.voted { color: #8b0000; }
-  .vote.down { font-size: 8pt; }
+  .vote.down { font-size: 16px; }
   .comment { padding: 8px 0; margin-left: var(--depth, 0px); border-left: 1px solid #e0e0e0; padding-left: 8px; }
-  .comment .text { font-size: 9pt; margin-top: 4px; white-space: pre-wrap; }
-  .comment .actions { font-size: 8pt; color: #828282; margin-top: 2px; }
-  .comment .actions a { color: #828282; text-decoration: none; }
+  .comment .text { font-size: 15px; margin-top: 4px; white-space: pre-wrap; line-height: 1.4; }
+  .comment .actions { font-size: 14px; color: #828282; margin-top: 4px; }
+  .comment .actions a { color: #828282; text-decoration: none; padding: 4px 8px; margin: -4px 0; min-height: 32px; display: inline-flex; align-items: center; }
   .comment .actions a:hover { text-decoration: underline; }
+  .collapse-toggle { cursor: pointer; user-select: none; color: #828282; font-size: 14px; padding: 2px 6px; margin-right: 4px; }
+  .collapse-toggle:hover { background: #f0f0f0; }
+  .collapsed { display: none; }
   form { margin: 10px 0; }
-  input, textarea, select { font-family: monospace; font-size: 10pt; margin: 4px 0; }
+  input, textarea, select { font-family: monospace; font-size: 16px; margin: 4px 0; }
   textarea { width: 100%; max-width: 600px; }
-  input[type=text], input[type=url], input[type=password] { width: 400px; max-width: 100%; }
-  button { font-size: 10pt; cursor: pointer; background: #8b0000; color: #fff; border: none; padding: 4px 12px; }
+  input[type=text], input[type=url], input[type=password] { width: 100%; max-width: 400px; }
+  button { font-size: 16px; cursor: pointer; background: #8b0000; color: #fff; border: none; padding: 8px 16px; min-height: 44px; }
   button:hover { background: #a00000; }
   .flagged { opacity: 0.5; }
-  .injection-warning { background: #fff0f0; border: 1px solid #f00; padding: 4px 8px; font-size: 8pt; color: #a00; margin: 4px 0; display: inline-block; }
-  .link-tags { font-size: 8pt; }
-  .footer { border-top: 1px solid #8b0000; padding: 8px 0; font-size: 8pt; color: #828282; text-align: center; margin-top: 20px; }
+  .injection-warning { background: #fff0f0; border: 1px solid #f00; padding: 4px 8px; font-size: 14px; color: #a00; margin: 4px 0; display: inline-block; }
+  .link-tags { font-size: 14px; }
+  .footer { border-top: 1px solid #8b0000; padding: 8px 0; font-size: 14px; color: #828282; text-align: center; margin-top: 20px; line-height: 1.4; }
   .profile-header { padding: 10px 0; border-bottom: 1px solid #e0e0e0; margin-bottom: 10px; }
-  .profile-header h2 { font-size: 12pt; }
-  .profile-stat { font-size: 9pt; color: #828282; }
-  .pagination { font-size: 9pt; padding: 10px 0; }
-  .pagination a { margin: 0 4px; }
+  .profile-header h2 { font-size: 20px; }
+  .profile-stat { font-size: 15px; color: #828282; }
+  .pagination { font-size: 15px; padding: 10px 0; }
+  .pagination a { margin: 0 8px; padding: 8px; min-height: 44px; display: inline-flex; align-items: center; }
   .flag-form { display: inline; }
-  .flag-form select { font-size: 8pt; padding: 0; }
-  .flag-form button { font-size: 8pt; padding: 1px 4px; background: #828282; }
-  .msg { padding: 8px; margin: 8px 0; font-size: 9pt; border-left: 3px solid #8b0000; background: #fff8f8; }
+  .flag-form select { font-size: 14px; padding: 2px; }
+  .flag-form button { font-size: 14px; padding: 4px 8px; background: #828282; }
+  .msg { padding: 8px; margin: 8px 0; font-size: 15px; border-left: 3px solid #8b0000; background: #fff8f8; }
   .msg.error { border-color: #f00; background: #fff0f0; }
   .msg.success { border-color: #0a0; background: #f0fff0; }
+  .karma-req { color: #999; font-size: 12px; font-style: italic; }
+  
+  /* Comment collapsing */
+  details summary { list-style: none; }
+  details summary::-webkit-details-marker { display: none; }
+  details[open] .collapse-toggle::before { content: "[-]"; }
+  details:not([open]) .collapse-toggle::before { content: "[+]"; }
+  details:not([open]) .collapse-toggle::after { content: " (" attr(data-children) " children)"; color: #999; font-size: 12px; }
+  
+  /* Mobile-specific adjustments */
+  @media (max-width: 600px) {
+    body { font-size: 16px; padding: 0 4px; }
+    .header { padding: 8px 4px; margin: 0 -4px; }
+    .header a { padding: 6px 4px; }
+    .comment { margin-left: var(--mobile-depth, 0px); padding-left: 4px; }
+    .comment .text { font-size: 16px; }
+    .item .meta { font-size: 14px; }
+    .vote { font-size: 18px; min-width: 32px; min-height: 32px; }
+    .vote.down { font-size: 14px; }
+    button { padding: 12px 16px; }
+    .flag-form button { padding: 8px 12px; }
+    input[type=text], input[type=url], input[type=password] { width: 100%; }
+  }
+  
+  /* Table wrapper for horizontal scroll */
+  .table-wrapper { overflow-x: auto; }
+  .table-wrapper table { min-width: 100%; }
 `;
 
 const CSP = "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none';";
@@ -221,10 +251,25 @@ export function submissionItem(s: any, rank?: number, opts?: { userId?: string |
     ? `<span class="prefix">${escapeHtml(prefix.prefix)}:</span> ${escapeHtml(prefix.rest)}`
     : escapeHtml(s.title);
 
-  // Flag links: 🚩 general, 💉 injection
-  const flagHtml = opts?.userId
-    ? ` | <a href="/flag?type=submission&amp;id=${s.id}&amp;category=general" title="flag">🚩</a> <a href="/flag?type=submission&amp;id=${s.id}&amp;category=injection" title="report injection">💉</a>`
-    : '';
+  // Flag links: 🚩 general (50+ karma), 💉 injection (25+ karma)
+  const userKarma = opts?.userId ? (opts as any).userKarma || 0 : 0;
+  const canFlag = opts?.userId && userKarma >= 50;
+  const canFlagInjection = opts?.userId && userKarma >= 25;
+  
+  let flagHtml = '';
+  if (canFlag || canFlagInjection) {
+    flagHtml = ' | ';
+    if (canFlag) {
+      flagHtml += `<a href="/flag?type=submission&amp;id=${s.id}&amp;category=general" title="flag">🚩</a> `;
+    } else {
+      flagHtml += `<span class="karma-req" title="requires 50 karma">🚩</span> `;
+    }
+    if (canFlagInjection) {
+      flagHtml += `<a href="/flag?type=submission&amp;id=${s.id}&amp;category=injection" title="report injection">💉</a>`;
+    } else {
+      flagHtml += `<span class="karma-req" title="requires 25 karma">💉</span>`;
+    }
+  }
 
   return `
     <div class="item${flagClass}">
@@ -246,13 +291,14 @@ export function commentItem(c: any, depth = 0, opts?: { userId?: string | null; 
   const flagClass = c.flagged ? ' flagged' : '';
   const userVote = opts?.userVotes?.get(c.id) || 0;
   const canDownvote = (opts?.userKarma || 0) >= 500;
+  const mobileDepth = Math.min(depth * 8, 40); // Limit mobile depth to avoid overflow
 
   const upvoteHtml = opts?.userId
     ? `<form method="POST" action="/vote" style="display:inline">
         <input type="hidden" name="target_type" value="comment">
         <input type="hidden" name="target_id" value="${c.id}">
         <input type="hidden" name="direction" value="1">
-        <button type="submit" class="vote${userVote === 1 ? ' voted' : ''}" style="background:none;border:none;color:${userVote === 1 ? '#8b0000' : '#828282'};cursor:pointer;padding:0;font-size:10pt;">▲</button>
+        <button type="submit" class="vote${userVote === 1 ? ' voted' : ''}" style="background:none;border:none;color:${userVote === 1 ? '#8b0000' : '#828282'};cursor:pointer;padding:0;">▲</button>
        </form>`
     : '<span class="vote">▲</span>';
 
@@ -261,38 +307,86 @@ export function commentItem(c: any, depth = 0, opts?: { userId?: string | null; 
         <input type="hidden" name="target_type" value="comment">
         <input type="hidden" name="target_id" value="${c.id}">
         <input type="hidden" name="direction" value="-1">
-        <button type="submit" class="vote down${userVote === -1 ? ' voted' : ''}" style="background:none;border:none;color:${userVote === -1 ? '#0000ff' : '#828282'};cursor:pointer;padding:0;font-size:8pt;">▼</button>
+        <button type="submit" class="vote down${userVote === -1 ? ' voted' : ''}" style="background:none;border:none;color:${userVote === -1 ? '#0000ff' : '#828282'};cursor:pointer;padding:0;">▼</button>
        </form>`
     : '';
 
-  const flagHtml = opts?.userId
-    ? ` | <a href="/flag?type=comment&amp;id=${c.id}&amp;category=general" title="flag">🚩</a> <a href="/flag?type=comment&amp;id=${c.id}&amp;category=injection" title="report injection">💉</a>`
-    : '';
+  const canFlag = opts?.userId && (opts?.userKarma || 0) >= 50;
+  const canFlagInjection = opts?.userId && (opts?.userKarma || 0) >= 25;
+  
+  let flagHtml = '';
+  if (canFlag || canFlagInjection) {
+    flagHtml = ' | ';
+    if (canFlag) {
+      flagHtml += `<a href="/flag?type=comment&amp;id=${c.id}&amp;category=general" title="flag">🚩</a> `;
+    } else {
+      flagHtml += `<span class="karma-req" title="requires 50 karma">🚩</span> `;
+    }
+    if (canFlagInjection) {
+      flagHtml += `<a href="/flag?type=comment&amp;id=${c.id}&amp;category=injection" title="report injection">💉</a>`;
+    } else {
+      flagHtml += `<span class="karma-req" title="requires 25 karma">💉</span>`;
+    }
+  }
 
   const replyHtml = opts?.userId
     ? ` | <a href="/reply?id=${c.id}&amp;sid=${c.submission_id}">reply</a>`
     : '';
 
-  let html = `
-    <div class="comment${flagClass}" style="--depth: ${depth * 20}px">
-      <div class="meta">
-        ${upvoteHtml}${downvoteHtml}
-        <a href="/user/${escapeHtml(c.author_username || '?')}">${escapeHtml(c.author_username || '?')}</a>
-        ${identityBadge(c.author_identity_type || 'human')}${trustBadge(c.author_trust_tier)}
-        <a href="/item/${c.submission_id}" title="${escapeHtml(c.created_at || '')}">${timeAgo(c.created_at)}</a> |
-        ${c.score} point${c.score !== 1 ? 's' : ''}
-        ${c.injection_score > 0 ? `| <span class="injection-warning">⚠️ ${c.injection_score.toFixed(2)}</span>` : ''}
-      </div>
-      <div class="text">${escapeHtml(c.body)}</div>
-      <div class="actions">${replyHtml.replace(/^\s*\|\s*/, '')}${flagHtml}</div>
-    </div>`;
+  // Count total descendants (recursive)
+  function countDescendants(comment: any): number {
+    if (!comment.children) return 0;
+    let count = comment.children.length;
+    for (const child of comment.children) {
+      count += countDescendants(child);
+    }
+    return count;
+  }
+  
+  const childCount = c.children ? c.children.length : 0;
+  const totalDescendants = countDescendants(c);
+  const hasChildren = childCount > 0;
 
-  if (c.children) {
+  // Use details/summary for collapsing if there are children
+  if (hasChildren) {
+    let html = `
+      <details open>
+        <summary class="comment${flagClass}" style="--depth: ${depth * 20}px; --mobile-depth: ${mobileDepth}px; list-style: none; cursor: pointer;">
+          <span class="collapse-toggle" data-children="${totalDescendants}"></span>
+          <div style="display: inline-block; width: calc(100% - 30px);">
+            <div class="meta">
+              ${upvoteHtml}${downvoteHtml}
+              <a href="/user/${escapeHtml(c.author_username || '?')}">${escapeHtml(c.author_username || '?')}</a>
+              ${identityBadge(c.author_identity_type || 'human')}${trustBadge(c.author_trust_tier)}
+              <a href="/item/${c.submission_id}" title="${escapeHtml(c.created_at || '')}">${timeAgo(c.created_at)}</a> |
+              ${c.score} point${c.score !== 1 ? 's' : ''}
+              ${c.injection_score > 0 ? `| <span class="injection-warning">⚠️ ${c.injection_score.toFixed(2)}</span>` : ''}
+            </div>
+            <div class="text">${escapeHtml(c.body)}</div>
+            <div class="actions">${replyHtml.replace(/^\s*\|\s*/, '')}${flagHtml}</div>
+          </div>
+        </summary>`;
+
     for (const child of c.children) {
       html += commentItem(child, depth + 1, opts);
     }
+    html += '</details>';
+    return html;
+  } else {
+    return `
+      <div class="comment${flagClass}" style="--depth: ${depth * 20}px; --mobile-depth: ${mobileDepth}px;">
+        <div class="meta">
+          ${upvoteHtml}${downvoteHtml}
+          <a href="/user/${escapeHtml(c.author_username || '?')}">${escapeHtml(c.author_username || '?')}</a>
+          ${identityBadge(c.author_identity_type || 'human')}${trustBadge(c.author_trust_tier)}
+          <a href="/item/${c.submission_id}" title="${escapeHtml(c.created_at || '')}">${timeAgo(c.created_at)}</a> |
+          ${c.score} point${c.score !== 1 ? 's' : ''}
+          ${c.injection_score > 0 ? `| <span class="injection-warning">⚠️ ${c.injection_score.toFixed(2)}</span>` : ''}
+        </div>
+        <div class="text">${escapeHtml(c.body)}</div>
+        <div class="actions">${replyHtml.replace(/^\s*\|\s*/, '')}${flagHtml}</div>
+      </div>`;
   }
-  return html;
 }
 
 export function paginationHtml(basePath: string, currentPage: number, hasMore: boolean): string {
