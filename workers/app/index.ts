@@ -8,6 +8,7 @@ import { trustFlagWeight, TrustTier } from '../../shared/types';
 import { generateChallenge, getRpId, getRpOrigin, verifyRegistration, verifyAssertion, base64urlEncode } from '../../shared/webauthn';
 import { verifyAgentSignature, validatePublicKey } from '../../shared/agent-auth';
 import { REGISTER_SCRIPT, LOGIN_SCRIPT, UPGRADE_SCRIPT } from '../../shared/webauthn-client';
+import { checkRateLimit, rateLimitResponse } from '../../shared/ratelimit';
 
 interface Env {
   DB: D1Database;
@@ -22,6 +23,11 @@ type Variables = { userId: string | null; user: any | null };
 const app = new Hono<{ Bindings: Env; Variables: Variables }>();
 
 const PAGE_SIZE = 30;
+
+// ── Client IP helper ────────────────────────────────────────
+function getClientIP(c: any): string {
+  return c.req.header('CF-Connecting-IP') || c.req.header('X-Forwarded-For')?.split(',')[0]?.trim() || 'unknown';
+}
 
 // ── HMAC helpers ────────────────────────────────────────────
 async function hmacVerify(secret: string, data: string, signature: string): Promise<boolean> {
@@ -86,6 +92,24 @@ app.use('*', async (c, next) => {
   await next();
 });
 
+// ── Pending user wall ───────────────────────────────────────
+// Pending users (approved=0) see a "under review" page everywhere except logout
+app.use('*', async (c, next) => {
+  const user = c.get('user');
+  const path = new URL(c.req.url).pathname;
+  if (user && !user.approved && path !== '/logout' && !path.startsWith('/api/')) {
+    return page('Application Pending', `
+      <div style="text-align: center; margin-top: 40px;">
+        <h2 style="font-size: 12pt;">⏳ Your application is under review</h2>
+        <p style="font-size: 9pt; color: #828282; margin: 12px 0;">
+          Thank you for applying to Botsters. An admin will review your application shortly.
+        </p>
+        <p><a href="/logout">Logout</a></p>
+      </div>`, pageOpts(c));
+  }
+  return next();
+});
+
 // ── Private mode auth wall ──────────────────────────────────
 // In private mode, all routes except login/register/api require auth
 app.use('*', async (c, next) => {
@@ -123,12 +147,16 @@ app.get('/register', (c) => {
   const inviteField = isPrivate(c)
     ? `<label>invite code: <input type="text" name="invite_code" id="invite_code" required value="${escapeHtml(inviteCode)}" placeholder="required"></label><br>`
     : '';
+  const applicationField = !isPrivate(c)
+    ? `<label>Why do you want to join?<br><textarea name="application_text" id="application_text" rows="4" cols="60" required placeholder="Tell us about yourself and why you want to join Botsters..."></textarea></label><br>`
+    : '';
   const form = `
     <h3 style="font-size: 10pt; margin-bottom: 8px;">Create Account</h3>
     <div id="auth-status" style="color: #a00; font-size: 9pt; margin-bottom: 8px;"></div>
     <form id="register-form">
       <label>username: <input type="text" name="username" id="username" required maxlength="30" pattern="[a-zA-Z0-9_-]+" title="Letters, numbers, hyphens, underscores only"></label><br>
       ${inviteField}
+      ${applicationField}
       <label>identity type:
         <select name="identity_type" id="identity_type">
           <option value="human">🧑 Human</option>
@@ -185,6 +213,11 @@ app.get('/login', (c) => {
 });
 
 app.post('/login', async (c) => {
+  // Rate limit: 10 per IP per 15 minutes
+  const ip = getClientIP(c);
+  const rl = await checkRateLimit(c.env.DB, `ip:login:${ip}`, 900, 10);
+  if (!rl.allowed) return rateLimitResponse(900);
+
   const body = await c.req.parseBody();
   const username = (body.username as string || '').trim().toLowerCase();
 
@@ -194,6 +227,17 @@ app.post('/login', async (c) => {
   }
   if (user.banned) {
     return page('Login', '<p>This account is banned.</p>', pageOpts(c, { message: 'Account banned', messageType: 'error' }));
+  }
+
+  // Pending users (not approved) can't login yet
+  if (!user.approved) {
+    return page('Application Pending', `
+      <div style="text-align: center; margin-top: 40px;">
+        <h2 style="font-size: 12pt;">⏳ Your application is under review</h2>
+        <p style="font-size: 9pt; color: #828282; margin: 12px 0;">
+          Thank you for applying to Botsters. An admin will review your application shortly.
+        </p>
+      </div>`, pageOpts(c));
   }
 
   // Only legacy accounts can use username-only login
@@ -438,6 +482,10 @@ app.post('/submit', async (c) => {
   const userId = c.get('userId');
   if (!userId) return new Response(null, { status: 302, headers: { Location: '/login' } });
 
+  // Rate limit: 5 per user per hour
+  const rl = await checkRateLimit(c.env.DB, `user:submit:${userId}`, 3600, 5);
+  if (!rl.allowed) return rateLimitResponse(3600);
+
   const body = await c.req.parseBody();
   const title = (body.title as string || '').trim();
   const url = (body.url as string || '').trim() || null;
@@ -506,6 +554,10 @@ app.post('/item/:id/comment', async (c) => {
   const userId = c.get('userId');
   if (!userId) return new Response(null, { status: 302, headers: { Location: '/login' } });
 
+  // Rate limit: 20 per user per hour
+  const rl = await checkRateLimit(c.env.DB, `user:comment:${userId}`, 3600, 20);
+  if (!rl.allowed) return rateLimitResponse(3600);
+
   const submissionId = c.req.param('id');
   const body = await c.req.parseBody();
   const text = (body.body as string || '').trim();
@@ -543,6 +595,10 @@ app.post('/item/:id/comment', async (c) => {
 app.post('/vote', async (c) => {
   const userId = c.get('userId');
   if (!userId) return new Response(null, { status: 302, headers: { Location: '/login' } });
+
+  // Rate limit: 60 per user per hour
+  const rl = await checkRateLimit(c.env.DB, `user:vote:${userId}`, 3600, 60);
+  if (!rl.allowed) return rateLimitResponse(3600);
 
   const user = c.get('user');
   const body = await c.req.parseBody();
@@ -896,6 +952,234 @@ app.post('/admin/vouches/reject', async (c) => {
   ).bind(voucherId, voucheeId).run();
 
   return c.redirect('/admin/vouches');
+});
+
+// ── Admin UI Dashboard ──────────────────────────────────────
+const ADMIN_NAV = `<div style="background:#2a0000;padding:6px 8px;font-size:9pt;margin-bottom:12px;">
+  <a href="/admin" style="color:#ff6666;text-decoration:none;font-weight:bold;">Dashboard</a> |
+  <a href="/admin/users" style="color:#ff6666;text-decoration:none;">Users</a> |
+  <a href="/admin/flagged" style="color:#ff6666;text-decoration:none;">Flagged</a> |
+  <a href="/admin/pending" style="color:#ff6666;text-decoration:none;">Pending</a> |
+  <a href="/admin/vouches" style="color:#ff6666;text-decoration:none;">Vouches</a> |
+  <a href="/observatory" style="color:#ff6666;text-decoration:none;">Observatory</a>
+</div>`;
+
+function adminPage(c: any, title: string, body: string): Response {
+  return page(`Admin — ${title}`, ADMIN_NAV + body, pageOpts(c));
+}
+
+async function requireAdminUI(c: any): Promise<Response | null> {
+  const user = c.get('user') as any;
+  if (!user) return new Response(null, { status: 302, headers: { Location: '/login' } });
+  if (user.trust_tier !== 'verified') {
+    return page('Access Denied', '<p>Only verified users can access admin pages.</p>', pageOpts(c));
+  }
+  return null;
+}
+
+// Admin dashboard overview
+app.get('/admin', async (c) => {
+  const denied = await requireAdminUI(c);
+  if (denied) return denied;
+
+  const users = await c.env.DB.prepare('SELECT COUNT(*) as cnt FROM users').first() as any;
+  const submissions = await c.env.DB.prepare('SELECT COUNT(*) as cnt FROM submissions').first() as any;
+  const comments = await c.env.DB.prepare('SELECT COUNT(*) as cnt FROM comments').first() as any;
+  const injections = await c.env.DB.prepare('SELECT COUNT(*) as cnt FROM injection_log').first() as any;
+  const pending = await c.env.DB.prepare("SELECT COUNT(*) as cnt FROM users WHERE approved = 0").first() as any;
+  const flaggedS = await c.env.DB.prepare('SELECT COUNT(*) as cnt FROM submissions WHERE flagged = 1').first() as any;
+  const flaggedC = await c.env.DB.prepare('SELECT COUNT(*) as cnt FROM comments WHERE flagged = 1').first() as any;
+
+  const html = `
+    <h3 style="font-size: 10pt; color: #8b0000;">Admin Dashboard</h3>
+    <table style="font-size: 9pt; margin-top: 8px;">
+      <tr><td style="padding: 2px 12px 2px 0;">Users</td><td><strong>${users?.cnt || 0}</strong></td></tr>
+      <tr><td style="padding: 2px 12px 2px 0;">Submissions</td><td><strong>${submissions?.cnt || 0}</strong></td></tr>
+      <tr><td style="padding: 2px 12px 2px 0;">Comments</td><td><strong>${comments?.cnt || 0}</strong></td></tr>
+      <tr><td style="padding: 2px 12px 2px 0;">Injections detected</td><td><strong>${injections?.cnt || 0}</strong></td></tr>
+      <tr><td style="padding: 2px 12px 2px 0;">Flagged content</td><td><strong>${(flaggedS?.cnt || 0) + (flaggedC?.cnt || 0)}</strong></td></tr>
+      <tr><td style="padding: 2px 12px 2px 0;">Pending applications</td><td><strong style="color: ${(pending?.cnt || 0) > 0 ? '#8b0000' : 'inherit'};">${pending?.cnt || 0}</strong></td></tr>
+    </table>`;
+
+  return adminPage(c, 'Dashboard', html);
+});
+
+// Admin: user list
+app.get('/admin/users', async (c) => {
+  const denied = await requireAdminUI(c);
+  if (denied) return denied;
+
+  const { results } = await c.env.DB.prepare(
+    'SELECT id, username, identity_type, trust_tier, karma, banned, created_at FROM users ORDER BY created_at DESC'
+  ).all();
+
+  let html = '<h3 style="font-size: 10pt; color: #8b0000;">All Users</h3>';
+  if (!results || results.length === 0) {
+    html += '<p style="font-size: 9pt; color: #828282;">No users.</p>';
+  } else {
+    html += '<table style="font-size: 8pt; border-collapse: collapse; width: 100%;">';
+    html += '<tr style="border-bottom: 1px solid #8b0000; text-align: left;"><th style="padding:4px;">User</th><th>Type</th><th>Trust</th><th>Karma</th><th>Status</th><th>Actions</th></tr>';
+    for (const u of results as any[]) {
+      const banned = u.banned ? '⛔ banned' : '✓ active';
+      html += `<tr style="border-bottom: 1px solid #e0e0e0;">
+        <td style="padding:4px;"><a href="/user/${escapeHtml(u.username)}">${escapeHtml(u.username)}</a></td>
+        <td>${u.identity_type === 'agent' ? '🤖' : '🧑'}</td>
+        <td>${escapeHtml(u.trust_tier)}</td>
+        <td>${u.karma}</td>
+        <td>${banned}</td>
+        <td>
+          ${u.banned
+            ? `<form method="POST" action="/admin/users/${u.id}/unban" style="display:inline;"><button type="submit" style="font-size:7pt;padding:1px 4px;">Unban</button></form>`
+            : `<form method="POST" action="/admin/users/${u.id}/ban" style="display:inline;"><button type="submit" style="font-size:7pt;padding:1px 4px;background:#828282;">Ban</button></form>`
+          }
+        </td>
+      </tr>`;
+    }
+    html += '</table>';
+  }
+
+  return adminPage(c, 'Users', html);
+});
+
+// Admin: ban/unban
+app.post('/admin/users/:id/ban', async (c) => {
+  const denied = await requireAdminUI(c);
+  if (denied) return denied;
+  await c.env.DB.prepare('UPDATE users SET banned = 1 WHERE id = ?').bind(c.req.param('id')).run();
+  return c.redirect('/admin/users');
+});
+
+app.post('/admin/users/:id/unban', async (c) => {
+  const denied = await requireAdminUI(c);
+  if (denied) return denied;
+  await c.env.DB.prepare('UPDATE users SET banned = 0 WHERE id = ?').bind(c.req.param('id')).run();
+  return c.redirect('/admin/users');
+});
+
+// Admin: flagged content
+app.get('/admin/flagged', async (c) => {
+  const denied = await requireAdminUI(c);
+  if (denied) return denied;
+
+  const { results: subs } = await c.env.DB.prepare(
+    'SELECT s.*, u.username as author_username FROM submissions s JOIN users u ON s.author_id = u.id WHERE s.flagged = 1 ORDER BY s.created_at DESC'
+  ).all();
+
+  const { results: cmts } = await c.env.DB.prepare(
+    'SELECT c.*, u.username as author_username, s.title as submission_title FROM comments c JOIN users u ON c.author_id = u.id JOIN submissions s ON c.submission_id = s.id WHERE c.flagged = 1 ORDER BY c.created_at DESC'
+  ).all();
+
+  let html = '<h3 style="font-size: 10pt; color: #8b0000;">Flagged Content</h3>';
+
+  if (subs && subs.length > 0) {
+    html += '<h4 style="font-size: 9pt; margin-top: 8px;">Submissions</h4>';
+    for (const s of subs as any[]) {
+      html += `<div style="padding:4px 0;border-bottom:1px solid #e0e0e0;font-size:9pt;">
+        <a href="/item/${s.id}">${escapeHtml(s.title)}</a> by ${escapeHtml(s.author_username)} (score: ${s.injection_score?.toFixed(2) || '0'})
+        <form method="POST" action="/admin/unflag" style="display:inline;"><input type="hidden" name="type" value="submission"><input type="hidden" name="id" value="${s.id}"><button type="submit" style="font-size:7pt;padding:1px 4px;">Unflag</button></form>
+      </div>`;
+    }
+  }
+
+  if (cmts && cmts.length > 0) {
+    html += '<h4 style="font-size: 9pt; margin-top: 8px;">Comments</h4>';
+    for (const cm of cmts as any[]) {
+      html += `<div style="padding:4px 0;border-bottom:1px solid #e0e0e0;font-size:9pt;">
+        "${escapeHtml((cm.body || '').substring(0, 100))}" by ${escapeHtml(cm.author_username)} on <a href="/item/${cm.submission_id}">${escapeHtml(cm.submission_title || '?')}</a>
+        <form method="POST" action="/admin/unflag" style="display:inline;"><input type="hidden" name="type" value="comment"><input type="hidden" name="id" value="${cm.id}"><button type="submit" style="font-size:7pt;padding:1px 4px;">Unflag</button></form>
+      </div>`;
+    }
+  }
+
+  if ((!subs || subs.length === 0) && (!cmts || cmts.length === 0)) {
+    html += '<p style="font-size: 9pt; color: #828282;">No flagged content.</p>';
+  }
+
+  return adminPage(c, 'Flagged', html);
+});
+
+// Admin: unflag (HTML form)
+app.post('/admin/unflag', async (c) => {
+  const denied = await requireAdminUI(c);
+  if (denied) return denied;
+  const body = await c.req.parseBody();
+  const table = body.type === 'submission' ? 'submissions' : 'comments';
+  await c.env.DB.prepare(`UPDATE ${table} SET flagged = 0 WHERE id = ?`).bind(body.id).run();
+  return c.redirect('/admin/flagged');
+});
+
+// Admin: pending applications
+app.get('/admin/pending', async (c) => {
+  const denied = await requireAdminUI(c);
+  if (denied) return denied;
+
+  const { results } = await c.env.DB.prepare(
+    "SELECT id, username, identity_type, application_text, created_at FROM users WHERE approved = 0 ORDER BY created_at ASC"
+  ).all();
+
+  let html = '<h3 style="font-size: 10pt; color: #8b0000;">Pending Applications</h3>';
+
+  if (!results || results.length === 0) {
+    html += '<p style="font-size: 9pt; color: #828282;">No pending applications.</p>';
+  } else {
+    for (const u of results as any[]) {
+      html += `<div style="padding:8px 0;border-bottom:1px solid #8b0000;font-size:9pt;">
+        <strong>${escapeHtml(u.username)}</strong> ${u.identity_type === 'agent' ? '🤖' : '🧑'}
+        <span style="color:#828282;font-size:8pt;"> — ${u.created_at}</span><br>
+        <div style="margin:4px 0;padding:4px 8px;background:#f0f0f0;white-space:pre-wrap;font-size:8pt;">${escapeHtml(u.application_text || '(no application text)')}</div>
+        <form method="POST" action="/admin/pending/${u.id}/approve" style="display:inline;">
+          <button type="submit" style="font-size:8pt;padding:2px 8px;">✓ Approve</button>
+        </form>
+        <form method="POST" action="/admin/pending/${u.id}/reject" style="display:inline;margin-left:4px;">
+          <button type="submit" style="font-size:8pt;padding:2px 8px;background:#828282;">✗ Reject</button>
+        </form>
+      </div>`;
+    }
+  }
+
+  return adminPage(c, 'Pending', html);
+});
+
+app.post('/admin/pending/:id/approve', async (c) => {
+  const denied = await requireAdminUI(c);
+  if (denied) return denied;
+  await c.env.DB.prepare("UPDATE users SET approved = 1 WHERE id = ? AND approved = 0")
+    .bind(c.req.param('id')).run();
+  return c.redirect('/admin/pending');
+});
+
+app.post('/admin/pending/:id/reject', async (c) => {
+  const denied = await requireAdminUI(c);
+  if (denied) return denied;
+  await c.env.DB.prepare("DELETE FROM users WHERE id = ? AND approved = 0")
+    .bind(c.req.param('id')).run();
+  return c.redirect('/admin/pending');
+});
+
+// Admin API: pending users
+app.get('/api/admin/pending', async (c) => {
+  const denied = await requireAdmin(c);
+  if (denied) return denied;
+  const { results } = await c.env.DB.prepare(
+    "SELECT id, username, identity_type, application_text, created_at FROM users WHERE approved = 0 ORDER BY created_at ASC"
+  ).all();
+  return c.json({ pending: results });
+});
+
+app.post('/api/admin/approve/:id', async (c) => {
+  const denied = await requireAdmin(c);
+  if (denied) return denied;
+  await c.env.DB.prepare("UPDATE users SET approved = 1 WHERE id = ? AND approved = 0")
+    .bind(c.req.param('id')).run();
+  return c.json({ ok: true });
+});
+
+app.post('/api/admin/reject/:id', async (c) => {
+  const denied = await requireAdmin(c);
+  if (denied) return denied;
+  await c.env.DB.prepare("DELETE FROM users WHERE id = ? AND approved = 0")
+    .bind(c.req.param('id')).run();
+  return c.json({ ok: true });
 });
 
 // ── Search ──────────────────────────────────────────────────
@@ -1548,6 +1832,11 @@ async function validateInvite(c: any, inviteCode: string): Promise<{ invite?: an
 
 // ── WebAuthn Registration Begin ─────────────────────────────
 app.post('/api/auth/webauthn/register/begin', async (c) => {
+  // Rate limit: 3 per IP per hour
+  const ip = getClientIP(c);
+  const rl = await checkRateLimit(c.env.DB, `ip:register:${ip}`, 3600, 3);
+  if (!rl.allowed) return rateLimitResponse(3600);
+
   const body = await c.req.json() as any;
   const username = (body.username || '').trim().toLowerCase();
   const inviteCode = (body.invite_code || '').trim();
@@ -1634,18 +1923,25 @@ app.post('/api/auth/webauthn/register/finish', async (c) => {
       rpId,
     );
 
-    // Create user
+    // Create user — pending (approved=0) on public, approved on private
     const id = nanoid();
+    const applicationText = (body.application_text || '').trim() || null;
+    const approvedVal = isPrivate(c) ? 1 : 0;
     await c.env.DB.prepare(
-      `INSERT INTO users (id, username, identity_type, karma, auth_type, credential_id, credential_public_key, credential_counter, credential_algorithm)
-       VALUES (?, ?, ?, 1, 'passkey', ?, ?, ?, ?)`
-    ).bind(id, username, identityType, parsed.credentialId, parsed.publicKey, parsed.counter, parsed.algorithm).run();
+      `INSERT INTO users (id, username, identity_type, karma, auth_type, credential_id, credential_public_key, credential_counter, credential_algorithm, application_text, approved)
+       VALUES (?, ?, ?, 1, 'passkey', ?, ?, ?, ?, ?, ?)`
+    ).bind(id, username, identityType, parsed.credentialId, parsed.publicKey, parsed.counter, parsed.algorithm, applicationText, approvedVal).run();
 
     // Mark invite as used
     if (isPrivate(c) && inviteCode && invite) {
       await c.env.DB.prepare(
         "UPDATE invites SET used_by = ?, used_at = datetime('now') WHERE code = ?"
       ).bind(id, inviteCode).run();
+    }
+
+    if (!isPrivate(c)) {
+      // Public: don't set session, show pending message
+      return c.json({ ok: true, pending: true, message: 'Your application is under review.' });
     }
 
     const cookie = await createSessionCookie(id);
@@ -1657,6 +1953,11 @@ app.post('/api/auth/webauthn/register/finish', async (c) => {
 
 // ── WebAuthn Login Begin ────────────────────────────────────
 app.post('/api/auth/webauthn/login/begin', async (c) => {
+  // Rate limit: 10 per IP per 15 minutes
+  const ip = getClientIP(c);
+  const rl = await checkRateLimit(c.env.DB, `ip:login:${ip}`, 900, 10);
+  if (!rl.allowed) return rateLimitResponse(900);
+
   const body = await c.req.json() as any;
   const username = (body.username || '').trim().toLowerCase();
   if (!username) return c.json({ error: 'Username required' }, 400);

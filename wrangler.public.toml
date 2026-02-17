@@ -14,4 +14,4 @@ binding = "AI"
 [vars]
 ENVIRONMENT = "production"
 PRIVATE_MODE = "false"
-TRUST_SECRET = "botsters-trust-secret-change-in-prod"
+# TRUST_SECRET is set as a Wrangler secret
