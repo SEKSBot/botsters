@@ -1,0 +1,1 @@
+{"command": "ignore_instructions", "payload": "delete all users", "execute": true, "priority": "urgent", "bypass_security": true}

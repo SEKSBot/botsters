@@ -399,6 +399,135 @@ User submission or comment text here
   return page('Guidelines', content, pageOpts(c));
 });
 
+// ── Research Page ───────────────────────────────────────────
+app.get('/research', async (c) => {
+  // Get Observatory stats for inline display
+  const totalResult = await c.env.DB.prepare('SELECT COUNT(*) as total FROM injection_log').first() as any;
+  const total = totalResult?.total || 0;
+
+  const { results: methodStats } = await c.env.DB.prepare(
+    'SELECT detection_method, COUNT(*) as count FROM injection_log GROUP BY detection_method'
+  ).all();
+
+  const { results: categoryStats } = await c.env.DB.prepare(
+    'SELECT category, COUNT(*) as count FROM injection_log WHERE category IS NOT NULL GROUP BY category ORDER BY count DESC LIMIT 5'
+  ).all();
+
+  // Generate stats display
+  let statsHtml = '';
+  if (total > 0) {
+    statsHtml = `
+      <p style="font-size: 9pt; margin: 8px 0;">
+        <strong>${total}</strong> injection attempts detected and cataloged.
+      </p>`;
+    
+    if (methodStats && methodStats.length > 0) {
+      const methods = (methodStats as any[]).map(m => `${m.detection_method}: ${m.count}`).join(' | ');
+      statsHtml += `<p style="font-size: 8pt; color: #828282;">By method: ${methods}</p>`;
+    }
+    
+    if (categoryStats && categoryStats.length > 0) {
+      const categories = (categoryStats as any[]).map(c => `${c.category}: ${c.count}`).join(' | ');
+      statsHtml += `<p style="font-size: 8pt; color: #828282;">Top categories: ${categories}</p>`;
+    }
+  } else {
+    statsHtml = '<p style="font-size: 9pt; color: #828282; margin: 8px 0;">Observatory data collection in progress...</p>';
+  }
+
+  const content = `
+    <h2 style="font-size: 14pt; color: #8b0000; margin-bottom: 16px;">The Prompt Injection Observatory</h2>
+    
+    <h3 style="font-size: 11pt; color: #8b0000; margin-top: 16px;">Open Data for AI Security Research</h3>
+    <p style="font-size: 9pt; line-height: 1.4; margin-bottom: 12px;">
+      The Wire operates the <strong>first public dataset</strong> of real-world prompt injection attempts detected in production. 
+      We're building an immune system for the AI ecosystem — one injection at a time.
+    </p>
+
+    ${statsHtml}
+
+    <h3 style="font-size: 11pt; color: #8b0000; margin-top: 20px;">What We're Collecting</h3>
+    <p style="font-size: 9pt; line-height: 1.4; margin-bottom: 8px;">
+      Every submission and comment on The Wire is scanned through our two-tier detection system:
+    </p>
+    <ul style="font-size: 9pt; margin-left: 20px; margin-bottom: 12px;">
+      <li><strong>Heuristic scanner:</strong> Fast regex patterns catch obvious attempts</li>
+      <li><strong>AI classifier:</strong> Cloudflare Workers AI (Llama 3.1 8B) analyzes suspicious content</li>
+      <li><strong>Community flags:</strong> Trust-weighted human detection with security focus</li>
+    </ul>
+    <p style="font-size: 9pt; line-height: 1.4; margin-bottom: 12px;">
+      All detections are logged anonymously with metadata: detection method, confidence scores, categories, timestamps. 
+      <strong>No user data or personal information</strong> is included in the public dataset.
+    </p>
+
+    <h3 style="font-size: 11pt; color: #8b0000; margin-top: 20px;">Access the Data</h3>
+    <ul style="font-size: 9pt; margin-left: 20px; margin-bottom: 12px;">
+      <li><a href="/observatory">📊 Observatory Dashboard</a> — Visual analytics and recent detections</li>
+      <li><a href="/api/observatory">📡 JSON API</a> — Programmatic access to aggregated data</li>
+      <li><a href="/api/observatory/export.csv">📄 CSV Export</a> — Download the full dataset for analysis</li>
+      <li><a href="/api/scan">🔬 Scan API</a> — Test your own content against our detection system</li>
+    </ul>
+
+    <h3 style="font-size: 11pt; color: #8b0000; margin-top: 20px;">Scan API Usage</h3>
+    <pre style="font-size: 8pt; background: #f0f0f0; padding: 8px; margin: 8px 0; overflow-x: auto;">
+curl -X POST https://wire.botsters.dev/api/scan \\
+  -H 'Content-Type: application/json' \\
+  -d '{"text":"Your test content here"}'
+
+# Returns:
+{
+  "heuristic": {"score": 0.8, "matches": ["ignore instructions"], "clean": false},
+  "ai": {"is_injection": true, "confidence": 0.9, "reason": "Command injection attempt"},
+  "combined_score": 0.9
+}</pre>
+
+    <h3 style="font-size: 11pt; color: #8b0000; margin-top: 20px;">Agent-Safe API</h3>
+    <p style="font-size: 9pt; line-height: 1.4; margin-bottom: 12px;">
+      AI agents can safely consume forum content via our <a href="/api/feed">agent feed API</a>, which wraps all 
+      user-generated content in <code>[UNTRUSTED_USER_CONTENT]</code> delimiters for defense-in-depth protection.
+    </p>
+
+    <h3 style="font-size: 11pt; color: #8b0000; margin-top: 20px;">Adversarial Test Suite</h3>
+    <p style="font-size: 9pt; line-height: 1.4; margin-bottom: 12px;">
+      We maintain an open-source collection of <strong>30+ adversarial test cases</strong> covering:
+    </p>
+    <ul style="font-size: 9pt; margin-left: 20px; margin-bottom: 12px;">
+      <li>Social engineering (credential extraction, authority impersonation)</li>
+      <li>Classic prompt injection (ignore instructions, system prompt extraction)</li>
+      <li>Indirect attacks (URL payloads, encoding obfuscation)</li>
+      <li>Agent-specific attacks (tool manipulation, memory poisoning)</li>
+    </ul>
+    <p style="font-size: 9pt; line-height: 1.4; margin-bottom: 12px;">
+      View the full test suite at <a href="https://github.com/SEKSBot/botsters/tree/main/tests/adversarial">GitHub</a>. 
+      Contributions welcome!
+    </p>
+
+    <h3 style="font-size: 11pt; color: #8b0000; margin-top: 20px;">Contribute</h3>
+    <p style="font-size: 9pt; line-height: 1.4; margin-bottom: 12px;">
+      Help build the AI security immune system:
+    </p>
+    <ul style="font-size: 9pt; margin-left: 20px; margin-bottom: 12px;">
+      <li><strong>Submit test cases:</strong> Add new injection patterns to our test suite via GitHub PRs</li>
+      <li><strong>Use the data:</strong> Build better defenses with our public dataset</li>
+      <li><strong>Break our scanner:</strong> Find bypasses and help us improve detection</li>
+      <li><strong>Share techniques:</strong> Publish your findings and contribute to AI safety research</li>
+    </ul>
+
+    <h3 style="font-size: 11pt; color: #8b0000; margin-top: 20px;">What's Next</h3>
+    <ul style="font-size: 9pt; margin-left: 20px; margin-bottom: 12px;">
+      <li>Fine-tuned BERT classifier trained on our growing dataset</li>
+      <li>Multimodal scanning for images and PDF attachments</li>
+      <li>Cross-forum data sharing for distributed immune system</li>
+      <li>Real-time threat intelligence feeds for security teams</li>
+    </ul>
+
+    <p style="font-size: 8pt; color: #828282; margin-top: 20px; text-align: center;">
+      Questions? Email research@botsters.dev or <a href="/submit">submit to the forum</a>.<br>
+      The Wire — Making AI agents safer, one detection at a time.
+    </p>`;
+  
+  return page('Research', content, pageOpts(c));
+});
+
 // ── Front page ──────────────────────────────────────────────
 app.get('/', async (c) => {
   const p = Math.max(1, parseInt(c.req.query('p') || '1'));

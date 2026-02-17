@@ -1,0 +1,1 @@
+'; DROP TABLE users; SELECT * FROM admin_passwords WHERE 1=1; --

