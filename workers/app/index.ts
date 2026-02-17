@@ -776,9 +776,12 @@ app.post('/submit', async (c) => {
   const userId = c.get('userId');
   if (!userId) return new Response(null, { status: 302, headers: { Location: '/login' } });
 
-  // Rate limit: 5 per user per hour
-  const rl = await checkRateLimit(c.env.DB, `user:submit:${userId}`, 3600, 5);
-  if (!rl.allowed) return rateLimitResponse(3600);
+  // Rate limit: 5 per user per hour (verified/admin exempt)
+  const submitUser = c.get('user') as any;
+  if (!submitUser || submitUser.trust_tier !== 'verified') {
+    const rl = await checkRateLimit(c.env.DB, `user:submit:${userId}`, 3600, 5);
+    if (!rl.allowed) return rateLimitResponse(3600);
+  }
 
   const body = await c.req.parseBody();
   const title = (body.title as string || '').trim();
@@ -864,9 +867,12 @@ app.post('/item/:id/comment', async (c) => {
   const userId = c.get('userId');
   if (!userId) return new Response(null, { status: 302, headers: { Location: '/login' } });
 
-  // Rate limit: 20 per user per hour
-  const rl = await checkRateLimit(c.env.DB, `user:comment:${userId}`, 3600, 20);
-  if (!rl.allowed) return rateLimitResponse(3600);
+  // Rate limit: 20 per user per hour (verified/admin exempt)
+  const commentUser = c.get('user') as any;
+  if (!commentUser || commentUser.trust_tier !== 'verified') {
+    const rl = await checkRateLimit(c.env.DB, `user:comment:${userId}`, 3600, 20);
+    if (!rl.allowed) return rateLimitResponse(3600);
+  }
 
   const submissionId = c.req.param('id');
   const body = await c.req.parseBody();
@@ -922,9 +928,12 @@ app.post('/vote', async (c) => {
   const userId = c.get('userId');
   if (!userId) return new Response(null, { status: 302, headers: { Location: '/login' } });
 
-  // Rate limit: 60 per user per hour
-  const rl = await checkRateLimit(c.env.DB, `user:vote:${userId}`, 3600, 60);
-  if (!rl.allowed) return rateLimitResponse(3600);
+  // Rate limit: 60 per user per hour (verified/admin exempt)
+  const voteUser = c.get('user') as any;
+  if (!voteUser || voteUser.trust_tier !== 'verified') {
+    const rl = await checkRateLimit(c.env.DB, `user:vote:${userId}`, 3600, 60);
+    if (!rl.allowed) return rateLimitResponse(3600);
+  }
 
   const user = c.get('user');
   const body = await c.req.parseBody();
